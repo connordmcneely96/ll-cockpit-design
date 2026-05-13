@@ -2,17 +2,22 @@ name: Deploy ll-cockpit-design
 on:
   push:
     branches: [main]
+  workflow_dispatch:
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      deployments: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
           cache: "npm"
       - run: npm ci
-      - run: npx @cloudflare/next-on-pages@latest
+      - run: npx opennextjs-cloudflare build
       - name: Deploy to Cloudflare Workers
         uses: cloudflare/wrangler-action@v3
         with:
