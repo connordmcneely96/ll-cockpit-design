@@ -1,11 +1,13 @@
 "use client";
 
 import { useState } from "react";
+import { useRouter } from "next/navigation";
 
 const LEFT_TABS = ["Prototype", "Slide deck", "From template", "Other"] as const;
 type LeftTab = (typeof LEFT_TABS)[number];
 
 export default function LeftPaneClient() {
+  const router = useRouter();
   const [activeTab, setActiveTab] = useState<LeftTab>("Prototype");
   const [projectName, setProjectName] = useState("");
   const [protoFidelity, setProtoFidelity] = useState<"wireframe" | "high-fidelity">("high-fidelity");
@@ -15,7 +17,12 @@ export default function LeftPaneClient() {
     activeTab === "From template" ? "+ Create from template" : "+ Create";
 
   function handleCreate() {
-    console.log("Create clicked", { activeTab, projectName });
+    const params = new URLSearchParams();
+    params.set("type", activeTab.toLowerCase().replace(/\s+/g, "-"));
+    if (projectName.trim()) params.set("name", projectName.trim());
+    if (activeTab === "Prototype") params.set("fidelity", protoFidelity);
+    if (activeTab === "Slide deck") params.set("speaker_notes", String(speakerNotes));
+    router.push(`/design/new?${params.toString()}`);
   }
 
   return (
@@ -76,6 +83,7 @@ export default function LeftPaneClient() {
             placeholder="Project name"
             value={projectName}
             onChange={(e) => setProjectName(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") handleCreate(); }}
             style={{
               width: "100%",
               border: "1px solid var(--design-border)",
@@ -224,7 +232,7 @@ export default function LeftPaneClient() {
             Create a design system so anyone can create good-looking designs and assets.
           </p>
           <button
-            onClick={() => console.log("Set up design system")}
+            onClick={() => router.push("/design/systems")}
             style={{
               width: "100%",
               background: "var(--design-terracotta)",
