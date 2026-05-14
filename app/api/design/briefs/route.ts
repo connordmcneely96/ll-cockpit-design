@@ -37,7 +37,7 @@ export async function GET() {
     const env = getCloudflareContext().env as unknown as Env
     const rows = await env.DB
       .prepare(
-        `SELECT id, client_name, project_name, status, created_at, updated_at
+        `SELECT id, client_name, status, preview_url, created_at, updated_at
          FROM design_briefs
          WHERE user_id = ?
          ORDER BY created_at DESC
