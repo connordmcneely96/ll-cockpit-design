@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import ChatPane from "./ChatPane";
 import FileTree from "./FileTree";
 import CodeViewer from "./CodeViewer";
-import type { BriefDetail } from "./page";
+import type { BriefDetail, Brief } from "./page";
 
 type Props = {
   briefId: string;
