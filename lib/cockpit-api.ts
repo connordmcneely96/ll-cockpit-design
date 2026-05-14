@@ -9,7 +9,8 @@ export async function cockpitFetch(
     ...options,
     headers: {
       "Content-Type": "application/json",
-      Cookie: `sb-access-token=${token}`,
+      // Send as Bearer token — ll-cockpit routes support getUser(token) directly
+      "Authorization": `Bearer ${token}`,
       ...(options.headers as Record<string, string>),
     },
   });
