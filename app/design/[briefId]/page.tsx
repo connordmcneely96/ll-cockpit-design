@@ -1,5 +1,6 @@
 import { cookies } from "next/headers";
-import { cockpitFetch } from "@/lib/cockpit-api";
+import { getCloudflareContext } from "@opennextjs/cloudflare";
+import { validateToken } from "@/lib/auth";
 import CanvasClient from "./CanvasClient";
 
 export type Subtask = {
@@ -18,7 +19,7 @@ export type Brief = {
   target_audience?: string;
   mood_tone?: string;
   must_have_sections?: string;
-  status: "building" | "done" | "error";
+  status: "building" | "done" | "error" | "preview_ready";
   current_iteration?: number;
   orchestrator_run_id?: string;
   created_at: number;
@@ -36,11 +37,60 @@ export type BriefDetail = {
   } | null;
 };
 
-async function fetchBriefDetail(briefId: string, token: string): Promise<BriefDetail | null> {
+type Env = {
+  DB: {
+    prepare: (sql: string) => {
+      bind: (...args: unknown[]) => {
+        first: <T = unknown>() => Promise<T | null>;
+        all: <T = unknown>() => Promise<{ results: T[] }>;
+      };
+    };
+  };
+};
+
+async function fetchBriefDetail(
+  briefId: string,
+  userId: string
+): Promise<BriefDetail | null> {
   try {
-    const res = await cockpitFetch(`/api/design/briefs/${briefId}`, token);
-    if (!res.ok) return null;
-    return await res.json();
+    const env = getCloudflareContext().env as unknown as Env;
+
+    const brief = await env.DB
+      .prepare(`SELECT * FROM design_briefs WHERE id = ? AND user_id = ?`)
+      .bind(briefId, userId)
+      .first<Brief>();
+
+    if (!brief) return null;
+
+    // Normalize status — preview_ready maps to done for UI display
+    if ((brief.status as string) === "preview_ready") {
+      brief.status = "done";
+    }
+
+    // Fetch subtasks if pipeline ran
+    let subtasks: Subtask[] = [];
+    let run = null;
+
+    if (brief.orchestrator_run_id) {
+      const subtaskRows = await env.DB
+        .prepare(
+          `SELECT id, agent, status, short_id, output, cost_usd
+           FROM agent_subtasks
+           WHERE pipeline_run_id = ?
+           ORDER BY short_id ASC`
+        )
+        .bind(brief.orchestrator_run_id)
+        .all<Subtask>();
+      subtasks = subtaskRows.results ?? [];
+
+      const runRow = await env.DB
+        .prepare(`SELECT * FROM orchestrator_runs WHERE id = ?`)
+        .bind(brief.orchestrator_run_id)
+        .first<{ id: string; status: string; subtasks_total: number; subtasks_done: number }>();
+      run = runRow ?? null;
+    }
+
+    return { brief, subtasks, run };
   } catch {
     return null;
   }
@@ -52,10 +102,6 @@ export default async function CanvasPage({
   params: Promise<{ briefId: string }>;
 }) {
   const { briefId } = await params;
-
-  // Token lives in the httpOnly cookie set by middleware on the ?token= entry flow
-  const cookieStore = await cookies();
-  const token = cookieStore.get("sb-access-token")?.value ?? "";
 
   // /design/new is the intake placeholder — 18D wires the full pre-flight form
   if (briefId === "new") {
@@ -85,7 +131,38 @@ export default async function CanvasPage({
     );
   }
 
-  const detail = await fetchBriefDetail(briefId, token);
+  // Validate session
+  const cookieStore = await cookies();
+  const token = cookieStore.get("sb-access-token")?.value ?? "";
+  const auth = token ? await validateToken(token) : null;
+
+  if (!auth) {
+    return (
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          height: "100vh",
+          flexDirection: "column",
+          gap: 12,
+          background: "var(--design-bg)",
+          color: "var(--design-ink)",
+          fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+        }}
+      >
+        <div style={{ fontSize: 18, fontWeight: 600 }}>Session expired</div>
+        <a
+          href="https://ll-cockpit.connorpattern.workers.dev/api/design/launch"
+          style={{ fontSize: 14, color: "var(--design-terracotta)", textDecoration: "none" }}
+        >
+          Re-authenticate →
+        </a>
+      </div>
+    );
+  }
+
+  const detail = await fetchBriefDetail(briefId, auth.userId);
 
   if (!detail) {
     return (
