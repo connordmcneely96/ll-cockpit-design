@@ -42,8 +42,6 @@ export default function ChatPane({ briefId, brief, subtasks, run, token }: Props
   const [expandedSubtask, setExpandedSubtask] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
 
-  // Keep the disclosure expanded while building; auto-collapse once done so
-  // the chat takes focus.
   useEffect(() => {
     if (brief.status === "building") setAgentOpen(true);
   }, [brief.status]);
@@ -52,7 +50,6 @@ export default function ChatPane({ briefId, brief, subtasks, run, token }: Props
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  // Compute totals for the disclosure header
   const totalCost = subtasks.reduce((sum, t) => sum + (t.cost_usd ?? 0), 0);
   const doneCount = subtasks.filter((t) => t.status === "done").length;
   const runningCount = subtasks.filter((t) => t.status === "running").length;
@@ -123,9 +120,23 @@ export default function ChatPane({ briefId, brief, subtasks, run, token }: Props
   }
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
-      {/* Agent execution disclosure */}
-      <div style={{ borderBottom: "1px solid var(--design-border)", flexShrink: 0 }}>
+    <div
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        height: "100%",
+        overflow: "hidden",
+        minWidth: 0, // critical for flex children — prevents content from forcing width
+      }}
+    >
+      {/* Agent execution disclosure header — always visible compact strip */}
+      <div
+        style={{
+          borderBottom: "1px solid var(--design-border)",
+          flexShrink: 0,
+          background: "var(--design-bg)",
+        }}
+      >
         <button
           onClick={() => setAgentOpen((o) => !o)}
           style={{
@@ -142,7 +153,18 @@ export default function ChatPane({ briefId, brief, subtasks, run, token }: Props
             textAlign: "left",
           }}
         >
-          <span style={{ fontSize: 10 }}>{agentOpen ? "▼" : "▶"}</span>
+          <span
+            style={{
+              fontSize: 10,
+              color: "var(--design-ink3)",
+              transition: "transform 0.15s ease",
+              transform: agentOpen ? "rotate(0deg)" : "rotate(-90deg)",
+              display: "inline-block",
+              width: 10,
+            }}
+          >
+            ▼
+          </span>
           <span style={{ fontWeight: 500 }}>Agent pipeline</span>
           {run && (
             <span style={{ color: "var(--design-ink3)", fontSize: 11 }}>
@@ -161,28 +183,45 @@ export default function ChatPane({ briefId, brief, subtasks, run, token }: Props
                 color: "var(--design-ink3)",
                 fontSize: 11,
                 fontFamily: "ui-monospace, 'JetBrains Mono', Menlo, monospace",
+                flexShrink: 0,
               }}
             >
               ${totalCost.toFixed(3)}
             </span>
           )}
         </button>
+      </div>
 
-        {agentOpen && (
+      {/* Agent disclosure body — collapsible, scrollable, fixed max-height */}
+      {agentOpen && (
+        <div
+          style={{
+            maxHeight: 220, // tighter — leaves more room for chat
+            overflowY: "auto",
+            background: "var(--design-bg)",
+            borderBottom: "1px solid var(--design-border)",
+            flexShrink: 0,
+          }}
+        >
           <div
             style={{
-              padding: "0 10px 8px",
-              maxHeight: 320,
-              overflowY: "auto",
+              padding: "8px 12px 10px",
               display: "flex",
               flexDirection: "column",
-              gap: 4,
+              gap: 5,
             }}
           >
             {subtasks.length === 0 ? (
-              <span style={{ fontSize: 12, color: "var(--design-ink3)", padding: "4px 6px" }}>
+              <div
+                style={{
+                  fontSize: 12,
+                  color: "var(--design-ink3)",
+                  padding: "6px 8px",
+                  fontStyle: "italic",
+                }}
+              >
                 Waiting for orchestrator to dispatch tasks…
-              </span>
+              </div>
             ) : (
               subtasks.map((t) => (
                 <AgentRow
@@ -194,18 +233,19 @@ export default function ChatPane({ briefId, brief, subtasks, run, token }: Props
               ))
             )}
           </div>
-        )}
-      </div>
+        </div>
+      )}
 
-      {/* Message list */}
+      {/* Message list — takes remaining vertical space */}
       <div
         style={{
           flex: 1,
+          minHeight: 0, // critical for flex children
           overflowY: "auto",
-          padding: "14px 14px 0",
+          padding: "16px 14px 0",
           display: "flex",
           flexDirection: "column",
-          gap: 12,
+          gap: 14,
         }}
       >
         {messages.map((msg) => (
@@ -223,6 +263,7 @@ export default function ChatPane({ briefId, brief, subtasks, run, token }: Props
           gap: 6,
           flexShrink: 0,
           borderTop: "1px solid var(--design-border)",
+          background: "var(--design-bg)",
         }}
       >
         {SKILLS.map((s) => (
@@ -233,7 +274,9 @@ export default function ChatPane({ briefId, brief, subtasks, run, token }: Props
               fontSize: 11,
               padding: "4px 10px",
               borderRadius: 999,
-              border: `1px solid ${activeSkill === s.id ? "var(--design-terracotta)" : "var(--design-border)"}`,
+              border: `1px solid ${
+                activeSkill === s.id ? "var(--design-terracotta)" : "var(--design-border)"
+              }`,
               background: activeSkill === s.id ? "var(--design-terracotta-soft)" : "transparent",
               color: activeSkill === s.id ? "var(--design-terracotta)" : "var(--design-ink3)",
               cursor: "pointer",
@@ -254,6 +297,7 @@ export default function ChatPane({ briefId, brief, subtasks, run, token }: Props
           display: "flex",
           gap: 8,
           alignItems: "flex-end",
+          background: "var(--design-bg)",
         }}
       >
         <textarea
@@ -269,6 +313,7 @@ export default function ChatPane({ briefId, brief, subtasks, run, token }: Props
           rows={2}
           style={{
             flex: 1,
+            minWidth: 0,
             resize: "none",
             border: "1px solid var(--design-border)",
             borderRadius: 8,
@@ -285,7 +330,10 @@ export default function ChatPane({ briefId, brief, subtasks, run, token }: Props
           onClick={handleSend}
           disabled={!input.trim() || sending}
           style={{
-            background: input.trim() && !sending ? "var(--design-terracotta)" : "var(--design-terracotta-disabled)",
+            background:
+              input.trim() && !sending
+                ? "var(--design-terracotta)"
+                : "var(--design-terracotta-disabled)",
             color: "white",
             border: "none",
             borderRadius: 8,
@@ -315,7 +363,9 @@ function AgentRow({
 }) {
   const hasOutput = subtask.output && subtask.output.length > 0;
   const isRunning = subtask.status === "running";
+  const isDone = subtask.status === "done";
   const isFailed = subtask.status === "failed" || subtask.status === "error";
+  const clickable = hasOutput || isFailed;
 
   return (
     <div
@@ -326,22 +376,26 @@ function AgentRow({
           ? "var(--design-terracotta-soft)"
           : isFailed
           ? "#fef2f2"
-          : "var(--design-bg)",
+          : isDone
+          ? "var(--design-paper)"
+          : "var(--design-bg2)",
         overflow: "hidden",
+        minWidth: 0, // prevent forcing parent width
       }}
     >
       <button
         onClick={onToggle}
-        disabled={!hasOutput && !isFailed}
+        disabled={!clickable}
         style={{
           width: "100%",
           background: "none",
           border: "none",
-          padding: "7px 9px",
+          padding: "8px 10px",
+          minHeight: 36, // FIXED row height prevents collapse
           display: "flex",
           alignItems: "center",
-          gap: 8,
-          cursor: hasOutput || isFailed ? "pointer" : "default",
+          gap: 9,
+          cursor: clickable ? "pointer" : "default",
           fontSize: 12,
           color: "var(--design-ink2)",
           textAlign: "left",
@@ -353,7 +407,8 @@ function AgentRow({
             fontFamily: "ui-monospace, 'JetBrains Mono', Menlo, monospace",
             fontSize: 10,
             color: "var(--design-ink3)",
-            minWidth: 30,
+            minWidth: 32,
+            flexShrink: 0,
           }}
         >
           {subtask.short_id}
@@ -363,10 +418,12 @@ function AgentRow({
             fontWeight: 500,
             color: "var(--design-ink)",
             flex: 1,
+            minWidth: 0,
             overflow: "hidden",
             textOverflow: "ellipsis",
             whiteSpace: "nowrap",
           }}
+          title={subtask.title || subtask.agent}
         >
           {subtask.title || subtask.agent}
         </span>
@@ -376,14 +433,25 @@ function AgentRow({
               fontSize: 10,
               color: "var(--design-ink3)",
               fontFamily: "ui-monospace, 'JetBrains Mono', Menlo, monospace",
+              flexShrink: 0,
             }}
           >
             ${subtask.cost_usd.toFixed(3)}
           </span>
         )}
-        {(hasOutput || isFailed) && (
-          <span style={{ fontSize: 9, color: "var(--design-ink3)" }}>
-            {expanded ? "▼" : "▶"}
+        {clickable && (
+          <span
+            style={{
+              fontSize: 8,
+              color: "var(--design-ink3)",
+              flexShrink: 0,
+              width: 8,
+              transition: "transform 0.15s ease",
+              transform: expanded ? "rotate(0deg)" : "rotate(-90deg)",
+              display: "inline-block",
+            }}
+          >
+            ▼
           </span>
         )}
       </button>
@@ -391,7 +459,7 @@ function AgentRow({
       {expanded && hasOutput && (
         <div
           style={{
-            padding: "6px 10px 9px",
+            padding: "8px 10px 10px",
             borderTop: "1px solid var(--design-border)",
             background: "var(--design-bg2)",
             fontFamily: "ui-monospace, 'JetBrains Mono', Menlo, monospace",
@@ -416,15 +484,16 @@ function AgentRow({
       {expanded && isFailed && !hasOutput && (
         <div
           style={{
-            padding: "6px 10px 9px",
+            padding: "8px 10px 10px",
             borderTop: "1px solid var(--design-border)",
             background: "#fef2f2",
             fontSize: 11,
             color: "#991b1b",
+            lineHeight: 1.5,
           }}
         >
-          This subtask failed but the overall design is not blocked. The
-          pipeline continues with the other agents.
+          This subtask failed. The overall design is not blocked — the pipeline
+          continues with the other agents.
         </div>
       )}
     </div>
@@ -432,7 +501,7 @@ function AgentRow({
 }
 
 function StatusIcon({ status }: { status: string }) {
-  const size = 12;
+  const size = 14;
   if (status === "done") {
     return (
       <span
@@ -443,7 +512,7 @@ function StatusIcon({ status }: { status: string }) {
           background: "#16a34a",
           display: "grid",
           placeItems: "center",
-          fontSize: 8,
+          fontSize: 9,
           color: "white",
           fontWeight: 700,
           flexShrink: 0,
@@ -463,7 +532,7 @@ function StatusIcon({ status }: { status: string }) {
           background: "#dc2626",
           display: "grid",
           placeItems: "center",
-          fontSize: 8,
+          fontSize: 9,
           color: "white",
           fontWeight: 700,
           flexShrink: 0,
@@ -515,8 +584,8 @@ function MessageBubble({ msg }: { msg: Message }) {
       {!isUser && (
         <div
           style={{
-            width: 24,
-            height: 24,
+            width: 26,
+            height: 26,
             borderRadius: "50%",
             background: "var(--design-terracotta-soft)",
             border: "1px solid var(--design-terracotta)",
@@ -538,7 +607,7 @@ function MessageBubble({ msg }: { msg: Message }) {
           background: isUser ? "var(--design-terracotta)" : "var(--design-bg2)",
           color: isUser ? "white" : "var(--design-ink)",
           borderRadius: isUser ? "12px 12px 2px 12px" : "12px 12px 12px 2px",
-          padding: "9px 12px",
+          padding: "10px 13px",
           fontSize: 13,
           lineHeight: 1.55,
           whiteSpace: "pre-wrap",
