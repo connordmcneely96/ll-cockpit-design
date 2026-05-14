@@ -4,10 +4,11 @@ import { validateToken } from "@/lib/auth";
 export async function middleware(request: NextRequest) {
   const { pathname, searchParams } = request.nextUrl;
 
-  // API routes and public paths handle their own auth — bypass middleware entirely.
-  // This prevents client-side fetch("/api/design/briefs") from being redirected
-  // to cockpit when the page-level session cookie is stale.
-  const publicPaths = ["/api/", "/favicon.ico"];
+  // Public paths handle their own auth — bypass middleware entirely.
+  // - /api/*           routes use cookie OR Bearer token internally
+  // - /design/preview/ public share-link route (token OR owner cookie)
+  // - /favicon.ico     asset
+  const publicPaths = ["/api/", "/design/preview/", "/favicon.ico"];
   if (publicPaths.some((p) => pathname.startsWith(p))) {
     return NextResponse.next();
   }
@@ -35,7 +36,6 @@ export async function middleware(request: NextRequest) {
 
   const auth = await validateToken(cookieToken);
   if (!auth) {
-    // Token invalid/expired/revoked — clear cookie, redirect to re-auth
     const response = redirectToCockpit(request);
     response.cookies.delete("sb-access-token");
     return response;

@@ -3,8 +3,9 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import ChatPane from "./ChatPane";
-import FileTree from "./FileTree";
+import FileTree, { type DesignFile } from "./FileTree";
 import CodeViewer from "./CodeViewer";
+import ShareModal from "./ShareModal";
 import type { BriefDetail, Brief } from "./page";
 
 type Props = {
@@ -17,10 +18,11 @@ export default function CanvasClient({ briefId, detail, token }: Props) {
   const router = useRouter();
   const { brief, subtasks, run } = detail;
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
+  const [files, setFiles] = useState<DesignFile[]>([]);
+  const [shareOpen, setShareOpen] = useState(false);
 
   const displayName = brief.client_name || "Untitled design";
 
-  // Progress: 0–100 based on subtasks done/total
   const progress =
     run && run.subtasks_total > 0
       ? Math.round((run.subtasks_done / run.subtasks_total) * 100)
@@ -39,7 +41,6 @@ export default function CanvasClient({ briefId, detail, token }: Props) {
         fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
       }}
     >
-      {/* Canvas header */}
       <header
         style={{
           height: 48,
@@ -52,7 +53,6 @@ export default function CanvasClient({ briefId, detail, token }: Props) {
           gap: 12,
         }}
       >
-        {/* Back */}
         <button
           onClick={() => router.push("/design")}
           style={{
@@ -72,7 +72,6 @@ export default function CanvasClient({ briefId, detail, token }: Props) {
           ←
         </button>
 
-        {/* Brief name */}
         <span
           style={{
             fontSize: 14,
@@ -87,28 +86,42 @@ export default function CanvasClient({ briefId, detail, token }: Props) {
           {displayName}
         </span>
 
-        {/* Status badge */}
         <StatusBadge status={brief.status} progress={progress} />
 
         <div style={{ flex: 1 }} />
 
-        {/* Iteration indicator */}
         {brief.current_iteration && brief.current_iteration > 1 && (
           <span style={{ fontSize: 12, color: "var(--design-ink3)" }}>
             v{brief.current_iteration}
           </span>
         )}
+
+        {/* Share button — only visible when there's something to share */}
+        {brief.status !== "building" && (
+          <button
+            onClick={() => setShareOpen(true)}
+            style={{
+              background: "var(--design-terracotta)",
+              color: "white",
+              border: "none",
+              borderRadius: 6,
+              padding: "5px 12px",
+              fontSize: 12,
+              fontWeight: 500,
+              cursor: "pointer",
+              display: "flex",
+              alignItems: "center",
+              gap: 4,
+            }}
+          >
+            <span style={{ fontSize: 13, lineHeight: 1 }}>↗</span>
+            Share preview
+          </button>
+        )}
       </header>
 
-      {/* Progress bar — visible while building */}
       {brief.status === "building" && (
-        <div
-          style={{
-            height: 2,
-            background: "var(--design-border)",
-            flexShrink: 0,
-          }}
-        >
+        <div style={{ height: 2, background: "var(--design-border)", flexShrink: 0 }}>
           <div
             style={{
               height: "100%",
@@ -120,9 +133,7 @@ export default function CanvasClient({ briefId, detail, token }: Props) {
         </div>
       )}
 
-      {/* Body — 30/70 split */}
       <div style={{ display: "flex", flex: 1, overflow: "hidden" }}>
-        {/* Left: Chat pane ~32% */}
         <div
           style={{
             width: "32%",
@@ -143,9 +154,7 @@ export default function CanvasClient({ briefId, detail, token }: Props) {
           />
         </div>
 
-        {/* Right: File tree + code viewer ~68% */}
         <div style={{ flex: 1, display: "flex", overflow: "hidden" }}>
-          {/* File tree sidebar */}
           <div
             style={{
               width: 200,
@@ -156,26 +165,31 @@ export default function CanvasClient({ briefId, detail, token }: Props) {
               flexShrink: 0,
             }}
           >
-            <FileTree selectedFile={selectedFile} onSelectFile={setSelectedFile} />
+            <FileTree
+              briefId={briefId}
+              selectedFile={selectedFile}
+              onSelectFile={setSelectedFile}
+              onFilesLoaded={setFiles}
+            />
           </div>
 
-          {/* Code viewer main area */}
           <div style={{ flex: 1, overflow: "hidden", display: "flex", flexDirection: "column" }}>
-            <CodeViewer selectedFile={selectedFile} briefStatus={brief.status} />
+            <CodeViewer
+              briefId={briefId}
+              files={files}
+              selectedFile={selectedFile}
+              briefStatus={brief.status}
+            />
           </div>
         </div>
       </div>
+
+      <ShareModal briefId={briefId} open={shareOpen} onClose={() => setShareOpen(false)} />
     </div>
   );
 }
 
-function StatusBadge({
-  status,
-  progress,
-}: {
-  status: Brief["status"];
-  progress: number;
-}) {
+function StatusBadge({ status, progress }: { status: Brief["status"]; progress: number }) {
   const map: Record<Brief["status"], { label: string; color: string; bg: string }> = {
     building: { label: `Building${progress > 0 ? ` ${progress}%` : "…"}`, color: "#b45309", bg: "#fef3c7" },
     done: { label: "Done", color: "#166534", bg: "#dcfce7" },
@@ -199,5 +213,4 @@ function StatusBadge({
   );
 }
 
-// Re-export type so child components can import it without circular dep
 export type { Brief } from "./page";

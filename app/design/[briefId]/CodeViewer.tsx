@@ -1,34 +1,31 @@
 "use client";
 
 import { useState } from "react";
+import type { DesignFile } from "./FileTree";
 
 type Props = {
+  briefId: string;
+  files: DesignFile[];
   selectedFile: string | null;
   briefStatus: "building" | "done" | "error";
 };
 
 type ViewMode = "code" | "preview";
 
-export default function CodeViewer({ selectedFile, briefStatus }: Props) {
+export default function CodeViewer({ briefId, files, selectedFile, briefStatus }: Props) {
   const [viewMode, setViewMode] = useState<ViewMode>("code");
 
-  // Empty state — no file selected or design still building
-  if (!selectedFile) {
-    return (
-      <EmptyState briefStatus={briefStatus} />
-    );
+  const file = files.find((f) => f.path === selectedFile) ?? null;
+  const htmlFile = files.find((f) => f.type === "html") ?? null;
+
+  if (!file && !htmlFile) {
+    return <EmptyState briefStatus={briefStatus} />;
   }
 
+  const activeFile = file ?? htmlFile!;
+
   return (
-    <div
-      style={{
-        display: "flex",
-        flexDirection: "column",
-        height: "100%",
-        background: "var(--design-paper)",
-      }}
-    >
-      {/* Viewer header */}
+    <div style={{ display: "flex", flexDirection: "column", height: "100%", background: "var(--design-paper)" }}>
       <div
         style={{
           height: 40,
@@ -40,7 +37,6 @@ export default function CodeViewer({ selectedFile, briefStatus }: Props) {
           flexShrink: 0,
         }}
       >
-        {/* File path */}
         <span
           style={{
             fontSize: 12,
@@ -52,18 +48,10 @@ export default function CodeViewer({ selectedFile, briefStatus }: Props) {
             whiteSpace: "nowrap",
           }}
         >
-          {selectedFile}
+          {activeFile.path}
         </span>
 
-        {/* Code / Preview toggle */}
-        <div
-          style={{
-            display: "flex",
-            border: "1px solid var(--design-border)",
-            borderRadius: 6,
-            overflow: "hidden",
-          }}
-        >
+        <div style={{ display: "flex", border: "1px solid var(--design-border)", borderRadius: 6, overflow: "hidden" }}>
           {(["code", "preview"] as ViewMode[]).map((mode) => (
             <button
               key={mode}
@@ -86,12 +74,11 @@ export default function CodeViewer({ selectedFile, briefStatus }: Props) {
         </div>
       </div>
 
-      {/* Content area */}
       <div style={{ flex: 1, overflow: "hidden", position: "relative" }}>
         {viewMode === "code" ? (
-          <CodePlaceholder selectedFile={selectedFile} />
+          <CodeBlock content={activeFile.content} />
         ) : (
-          <PreviewPlaceholder />
+          <PreviewFrame briefId={briefId} hasHtml={htmlFile !== null} />
         )}
       </div>
     </div>
@@ -100,15 +87,7 @@ export default function CodeViewer({ selectedFile, briefStatus }: Props) {
 
 function EmptyState({ briefStatus }: { briefStatus: Props["briefStatus"] }) {
   return (
-    <div
-      style={{
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        height: "100%",
-        background: "var(--design-paper)",
-      }}
-    >
+    <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100%", background: "var(--design-paper)" }}>
       <div
         style={{
           border: "1.5px dashed var(--design-border)",
@@ -121,66 +100,31 @@ function EmptyState({ briefStatus }: { briefStatus: Props["briefStatus"] }) {
         <div style={{ fontSize: 28, marginBottom: 12 }}>
           {briefStatus === "building" ? "⏳" : briefStatus === "error" ? "⚠️" : "📄"}
         </div>
-        <div
-          style={{
-            fontSize: 15,
-            fontWeight: 600,
-            color: "var(--design-ink)",
-            marginBottom: 8,
-          }}
-        >
+        <div style={{ fontSize: 15, fontWeight: 600, color: "var(--design-ink)", marginBottom: 8 }}>
           {briefStatus === "building"
             ? "Your design is building…"
             : briefStatus === "error"
             ? "Build encountered an error"
-            : "Select a file to view"}
+            : "No files available yet"}
         </div>
-        <div
-          style={{
-            fontSize: 13,
-            color: "var(--design-ink3)",
-            lineHeight: 1.6,
-          }}
-        >
+        <div style={{ fontSize: 13, color: "var(--design-ink3)", lineHeight: 1.6 }}>
           {briefStatus === "building"
-            ? "Files will appear in the tree as each section completes. You can ask for changes in the chat while it builds."
+            ? "Files will appear in the tree as each section completes."
             : briefStatus === "error"
             ? "Use the chat to describe what went wrong and the agents will retry."
-            : "Click a file in the left panel to view its code or preview it in an iframe."}
-        </div>
-
-        {/* Drop zone indicator */}
-        <div
-          style={{
-            marginTop: 20,
-            border: "1px dashed var(--design-border)",
-            borderRadius: 8,
-            padding: "12px 16px",
-            fontSize: 12,
-            color: "var(--design-ink3)",
-          }}
-        >
-          ↑ DROP FILES to import assets
+            : "Files populate from the pipeline output."}
         </div>
       </div>
     </div>
   );
 }
 
-function CodePlaceholder({ selectedFile }: { selectedFile: string }) {
-  const ext = selectedFile.split(".").pop() ?? "";
-  const commentMap: Record<string, string> = {
-    html: "<!-- File content loads here in Sprint 18C when design_brief_files is wired -->",
-    jsx: "// File content loads here in Sprint 18C when design_brief_files is wired",
-    css: "/* File content loads here in Sprint 18C when design_brief_files is wired */",
-  };
-  const placeholder = commentMap[ext] ?? "// File content loads here in Sprint 18C";
-
+function CodeBlock({ content }: { content: string }) {
   return (
     <div
       style={{
         height: "100%",
-        overflowY: "auto",
+        overflow: "auto",
         padding: 20,
         background: "#1e1e2e",
       }}
@@ -189,42 +133,51 @@ function CodePlaceholder({ selectedFile }: { selectedFile: string }) {
         style={{
           margin: 0,
           fontFamily: "ui-monospace, 'JetBrains Mono', Menlo, monospace",
-          fontSize: 13,
-          color: "#6b7280",
-          lineHeight: 1.7,
+          fontSize: 12,
+          color: "#e4e4e7",
+          lineHeight: 1.6,
+          whiteSpace: "pre-wrap",
+          wordBreak: "break-word",
         }}
       >
-        {placeholder}
+        {content}
       </pre>
     </div>
   );
 }
 
-function PreviewPlaceholder() {
-  return (
-    <div
-      style={{
-        height: "100%",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        background: "var(--design-bg2)",
-        flexDirection: "column",
-        gap: 10,
-      }}
-    >
-      <div style={{ fontSize: 13, color: "var(--design-ink3)" }}>
-        Preview iframe loads in Sprint 18C
-      </div>
+function PreviewFrame({ briefId, hasHtml }: { briefId: string; hasHtml: boolean }) {
+  if (!hasHtml) {
+    return (
       <div
         style={{
-          fontSize: 11,
-          color: "var(--design-ink3)",
-          opacity: 0.6,
+          height: "100%",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          background: "var(--design-bg2)",
+          flexDirection: "column",
+          gap: 8,
         }}
       >
-        HTML output renders here once design_brief_files is wired
+        <div style={{ fontSize: 13, color: "var(--design-ink3)" }}>
+          No HTML to preview yet
+        </div>
       </div>
-    </div>
+    );
+  }
+
+  return (
+    <iframe
+      src={`/design/preview/${briefId}`}
+      style={{
+        width: "100%",
+        height: "100%",
+        border: "none",
+        background: "white",
+      }}
+      sandbox="allow-same-origin allow-scripts allow-popups"
+      title="Design preview"
+    />
   );
 }
