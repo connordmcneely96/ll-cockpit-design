@@ -9,7 +9,11 @@ export async function cockpitFetch(
     ...options,
     headers: {
       "Content-Type": "application/json",
-      Cookie: `sb-access-token=${token}`,
+      // Send as Authorization Bearer so ll-cockpit routes can validate
+      // the JWT directly via supabase.auth.getUser(token).
+      // Cookie-based forwarding doesn't work because ll-cockpit uses
+      // @supabase/ssr chunked cookies, not a single sb-access-token cookie.
+      "Authorization": `Bearer ${token}`,
       ...(options.headers as Record<string, string>),
     },
   });
