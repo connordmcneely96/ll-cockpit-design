@@ -1,12 +1,12 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 import ChatPane from "./ChatPane";
 import FileTree, { type DesignFile } from "./FileTree";
 import CodeViewer from "./CodeViewer";
 import ShareModal from "./ShareModal";
-import type { BriefDetail, Brief } from "./page";
+import type { BriefDetail, Brief, Subtask } from "./page";
 
 type Props = {
   briefId: string;
@@ -14,14 +14,62 @@ type Props = {
   token: string;
 };
 
-export default function CanvasClient({ briefId, detail, token }: Props) {
+export default function CanvasClient({ briefId, detail: initialDetail, token }: Props) {
   const router = useRouter();
-  const { brief, subtasks, run } = detail;
+  const [detail, setDetail] = useState<BriefDetail>(initialDetail);
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
   const [files, setFiles] = useState<DesignFile[]>([]);
   const [shareOpen, setShareOpen] = useState(false);
+  const [filesRefreshKey, setFilesRefreshKey] = useState(0);
 
+  const lastDoneCountRef = useRef<number>(0);
+  const pollAbortRef = useRef<AbortController | null>(null);
+
+  const { brief, subtasks, run } = detail;
   const displayName = brief.client_name || "Untitled design";
+
+  // Poll every 3s while building. Stop when status flips to done/error.
+  useEffect(() => {
+    if (brief.status !== "building") {
+      lastDoneCountRef.current = subtasks.filter((s) => s.status === "done").length;
+      return;
+    }
+
+    let cancelled = false;
+    const tick = async () => {
+      if (cancelled) return;
+      const ctrl = new AbortController();
+      pollAbortRef.current = ctrl;
+      try {
+        const res = await fetch(`/api/design/briefs/${briefId}/detail`, { signal: ctrl.signal });
+        if (!res.ok) return;
+        const data: BriefDetail = await res.json();
+        if (cancelled) return;
+
+        setDetail(data);
+
+        // If subtask done-count increased, trigger a FileTree refetch
+        // so newly completed COMPOSER sections appear as files.
+        const newDoneCount = data.subtasks.filter((s) => s.status === "done").length;
+        if (newDoneCount > lastDoneCountRef.current) {
+          lastDoneCountRef.current = newDoneCount;
+          setFilesRefreshKey((k) => k + 1);
+        }
+      } catch (err) {
+        if ((err as Error).name === "AbortError") return;
+        console.error("poll error", err);
+      }
+    };
+
+    // Fire immediately, then every 3s
+    tick();
+    const interval = setInterval(tick, 3000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+      pollAbortRef.current?.abort();
+    };
+  }, [briefId, brief.status]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const progress =
     run && run.subtasks_total > 0
@@ -96,7 +144,6 @@ export default function CanvasClient({ briefId, detail, token }: Props) {
           </span>
         )}
 
-        {/* Share button — only visible when there's something to share */}
         {brief.status !== "building" && (
           <button
             onClick={() => setShareOpen(true)}
@@ -170,6 +217,7 @@ export default function CanvasClient({ briefId, detail, token }: Props) {
               selectedFile={selectedFile}
               onSelectFile={setSelectedFile}
               onFilesLoaded={setFiles}
+              refreshKey={filesRefreshKey}
             />
           </div>
 
@@ -213,4 +261,4 @@ function StatusBadge({ status, progress }: { status: Brief["status"]; progress: 
   );
 }
 
-export type { Brief } from "./page";
+export type { Brief, Subtask } from "./page";
