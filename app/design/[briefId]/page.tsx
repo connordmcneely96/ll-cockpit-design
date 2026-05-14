@@ -50,7 +50,6 @@ type Env = {
 
 type BriefRaw = Omit<Brief, "status"> & { status: string };
 
-// Raw row shape from agent_subtasks — must match D1 column names exactly
 type SubtaskRaw = {
   id: string;
   agent_name: string;
@@ -112,7 +111,6 @@ async function fetchBriefDetail(
       }));
     } catch (err) {
       console.error("fetchBriefDetail: agent_subtasks query failed", err);
-      // Non-fatal — render canvas with empty subtasks
     }
 
     try {
@@ -122,7 +120,6 @@ async function fetchBriefDetail(
         .first<{ id: string; status: string; subtasks_total: number; subtasks_done: number }>();
     } catch (err) {
       console.error("fetchBriefDetail: orchestrator_runs query failed", err);
-      // Non-fatal
     }
   }
 
@@ -136,32 +133,8 @@ export default async function CanvasPage({
 }) {
   const { briefId } = await params;
 
-  if (briefId === "new") {
-    return (
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          height: "100vh",
-          flexDirection: "column",
-          gap: 16,
-          background: "var(--design-bg)",
-          color: "var(--design-ink)",
-          fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
-        }}
-      >
-        <div style={{ fontSize: 32 }}>✦</div>
-        <div style={{ fontSize: 18, fontWeight: 600 }}>Brief intake coming soon</div>
-        <div style={{ fontSize: 14, color: "var(--design-ink3)", maxWidth: 320, textAlign: "center" }}>
-          Pre-flight questions will appear here in Sprint 18D. For now, open an existing design from the{" "}
-          <a href="/design" style={{ color: "var(--design-terracotta)", textDecoration: "none" }}>
-            landing page
-          </a>.
-        </div>
-      </div>
-    );
-  }
+  // Note: /design/new is handled by a dedicated static route — not this dynamic
+  // segment. The placeholder branch that lived here has been removed in Sprint 18D.
 
   const cookieStore = await cookies();
   const token = cookieStore.get("sb-access-token")?.value ?? "";
