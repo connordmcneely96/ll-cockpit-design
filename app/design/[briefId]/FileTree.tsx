@@ -13,6 +13,7 @@ type Props = {
   selectedFile: string | null;
   onSelectFile: (path: string) => void;
   onFilesLoaded: (files: DesignFile[]) => void;
+  refreshKey?: number; // Bump from parent to trigger a refetch
 };
 
 type Section = {
@@ -27,13 +28,24 @@ const SECTIONS: Section[] = [
   { label: "TOKENS", prefix: "design-tokens" },
 ];
 
-export default function FileTree({ briefId, selectedFile, onSelectFile, onFilesLoaded }: Props) {
+export default function FileTree({
+  briefId,
+  selectedFile,
+  onSelectFile,
+  onFilesLoaded,
+  refreshKey = 0,
+}: Props) {
   const [files, setFiles] = useState<DesignFile[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
+    // On the very first load, show the skeleton. On polled refetches, do silent
+    // updates so the tree doesn't flicker between every 3s tick.
+    const isFirstLoad = refreshKey === 0;
+    if (isFirstLoad) setLoading(true);
+
     fetch(`/api/design/briefs/${briefId}/files`)
       .then((r) => r.json())
       .then((data) => {
@@ -42,7 +54,6 @@ export default function FileTree({ briefId, selectedFile, onSelectFile, onFilesL
         setFiles(list);
         onFilesLoaded(list);
         setLoading(false);
-        // Auto-select first file if nothing selected yet
         if (list.length > 0 && !selectedFile) {
           onSelectFile(list[0].path);
         }
@@ -52,8 +63,10 @@ export default function FileTree({ briefId, selectedFile, onSelectFile, onFilesL
         setError(err instanceof Error ? err.message : "fetch_failed");
         setLoading(false);
       });
-    return () => { cancelled = true; };
-  }, [briefId]);  // eslint-disable-line react-hooks/exhaustive-deps
+    return () => {
+      cancelled = true;
+    };
+  }, [briefId, refreshKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden", background: "var(--design-bg)" }}>
@@ -67,9 +80,17 @@ export default function FileTree({ briefId, selectedFile, onSelectFile, onFilesL
           textTransform: "uppercase",
           borderBottom: "1px solid var(--design-border)",
           flexShrink: 0,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
         }}
       >
-        Files
+        <span>Files</span>
+        {files.length > 0 && (
+          <span style={{ fontWeight: 400, color: "var(--design-ink3)", fontSize: 10 }}>
+            {files.length}
+          </span>
+        )}
       </div>
 
       <div style={{ flex: 1, overflowY: "auto", padding: "8px 0" }}>
@@ -87,7 +108,7 @@ export default function FileTree({ briefId, selectedFile, onSelectFile, onFilesL
 
         {!loading && !error && files.length === 0 && (
           <div style={{ padding: "8px 12px", fontSize: 11, color: "var(--design-ink3)", lineHeight: 1.6 }}>
-            No files yet. Pipeline output will populate here once the build completes.
+            No files yet. Files appear here as each section completes.
           </div>
         )}
 
