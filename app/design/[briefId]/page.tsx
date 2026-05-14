@@ -6,6 +6,7 @@ import CanvasClient from "./CanvasClient";
 export type Subtask = {
   id: string;
   agent: string;        // mapped from agent_name in D1
+  title: string;        // human-readable e.g. "Compose Hero section"
   status: string;
   short_id: string;     // D1 stores as TEXT like 'st_1'
   output?: string;
@@ -53,6 +54,7 @@ type BriefRaw = Omit<Brief, "status"> & { status: string };
 type SubtaskRaw = {
   id: string;
   agent_name: string;
+  title: string;
   status: string;
   short_id: string;
   output: string | null;
@@ -93,7 +95,7 @@ async function fetchBriefDetail(
     try {
       const subtaskRows = await env.DB
         .prepare(
-          `SELECT id, agent_name, status, short_id, output, cost_usd
+          `SELECT id, agent_name, title, status, short_id, output, cost_usd
            FROM agent_subtasks
            WHERE pipeline_run_id = ?
            ORDER BY short_id ASC`
@@ -104,6 +106,7 @@ async function fetchBriefDetail(
       subtasks = (subtaskRows.results ?? []).map((r) => ({
         id: r.id,
         agent: r.agent_name,
+        title: r.title,
         status: r.status,
         short_id: r.short_id,
         output: r.output ?? undefined,
@@ -132,9 +135,6 @@ export default async function CanvasPage({
   params: Promise<{ briefId: string }>;
 }) {
   const { briefId } = await params;
-
-  // Note: /design/new is handled by a dedicated static route — not this dynamic
-  // segment. The placeholder branch that lived here has been removed in Sprint 18D.
 
   const cookieStore = await cookies();
   const token = cookieStore.get("sb-access-token")?.value ?? "";
