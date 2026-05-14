@@ -1,13 +1,19 @@
 /**
  * GET /api/design/briefs/[id]/files
  *
- * Owner-only. Returns virtual files derived from the brief's latest iteration:
- *   - pages/index.html       (from design_iterations.page_html)
- *   - stylesheets/styles.css (extracted <style>...</style> from page_html, or empty)
- *   - components/app.jsx     (extracted React if present, else empty)
- *   - design-tokens.json     (from design_iterations.design_tokens_json)
+ * Returns virtual files derived from the brief's latest iteration AND
+ * any completed COMPOSER subtasks (mid-stream visibility).
  *
- * No new D1 table — reads what the pipeline already wrote.
+ * Files when iteration is done:
+ *   - pages/index.html       (page_html as-is, the assembled output)
+ *   - stylesheets/styles.css (extracted <style> from page_html OR design_tokens)
+ *   - components/app.jsx     (extracted React if present)
+ *   - design-tokens.json     (DESIGNER output, pretty-printed)
+ *
+ * Files while iteration is building:
+ *   - design-tokens.json                    (as soon as DESIGNER done)
+ *   - components/{slug}.html                (one per COMPOSER done — show progress)
+ *   - pages/index.html                      (as soon as ASSEMBLER done)
  */
 import { cookies } from "next/headers";
 import { validateToken } from "@/lib/auth";
@@ -20,6 +26,7 @@ type Env = {
     prepare: (sql: string) => {
       bind: (...args: unknown[]) => {
         first: <T = unknown>() => Promise<T | null>;
+        all: <T = unknown>() => Promise<{ results: T[] }>;
       };
     };
   };
@@ -34,10 +41,19 @@ type IterationRow = {
   status: string;
 };
 
+type SubtaskRow = {
+  id: string;
+  agent_name: string;
+  title: string;
+  status: string;
+  output: string | null;
+};
+
 type FileEntry = {
   path: string;
   type: "html" | "css" | "jsx" | "json";
   content: string;
+  source?: "iteration" | "composer" | "designer";
 };
 
 function extractStyleTag(html: string): string {
@@ -46,10 +62,19 @@ function extractStyleTag(html: string): string {
 }
 
 function extractReactComponent(html: string): string {
-  // Heuristic: look for a <script type="text/jsx"> or //@react-component marker.
-  // Most ASSEMBLER output today is pure HTML, so this typically returns empty.
   const match = html.match(/<script[^>]*type=["']text\/jsx["'][^>]*>([\s\S]*?)<\/script>/i);
   return match ? match[1].trim() : "";
+}
+
+function slugifyTitle(title: string): string {
+  // "Compose Hero section" → "hero"
+  return title
+    .replace(/^Compose\s+/i, "")
+    .replace(/\s+section\s*$/i, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 40) || "section";
 }
 
 export async function GET(
@@ -60,23 +85,19 @@ export async function GET(
 
   const cookieStore = await cookies();
   const token = cookieStore.get("sb-access-token")?.value;
-  if (!token) {
-    return Response.json({ files: [], error: "no_session" }, { status: 401 });
-  }
+  if (!token) return Response.json({ files: [], error: "no_session" }, { status: 401 });
 
   const auth = await validateToken(token);
-  if (!auth) {
-    return Response.json({ files: [], error: "invalid_token" }, { status: 401 });
-  }
+  if (!auth) return Response.json({ files: [], error: "invalid_token" }, { status: 401 });
 
   try {
     const env = getCloudflareContext().env as unknown as Env;
 
-    // Tenant isolation: user_id check in the JOIN
     const iteration = await env.DB
       .prepare(
         `SELECT i.id, i.iteration_number, i.design_tokens_json, i.page_html,
-                i.preview_url, i.status
+                i.preview_url, i.status,
+                b.orchestrator_run_id
          FROM design_iterations i
          JOIN design_briefs b ON b.id = i.brief_id
          WHERE i.brief_id = ?
@@ -85,37 +106,85 @@ export async function GET(
          LIMIT 1`
       )
       .bind(briefId, auth.userId)
-      .first<IterationRow>();
+      .first<IterationRow & { orchestrator_run_id: string | null }>();
 
     if (!iteration) {
       return Response.json({ files: [], error: "not_found" }, { status: 404 });
     }
 
-    const pageHtml = iteration.page_html ?? "";
-    const styles = extractStyleTag(pageHtml);
-    const jsx = extractReactComponent(pageHtml);
-    const tokens = iteration.design_tokens_json ?? "";
-
     const files: FileEntry[] = [];
 
-    if (pageHtml) {
-      files.push({ path: "pages/index.html", type: "html", content: pageHtml });
-    }
-    if (styles) {
-      files.push({ path: "stylesheets/styles.css", type: "css", content: styles });
-    }
-    if (jsx) {
-      files.push({ path: "components/app.jsx", type: "jsx", content: jsx });
-    }
-    if (tokens) {
-      // Pretty-print if valid JSON, else keep as-is
-      let prettyTokens = tokens;
+    // Design tokens — available as soon as DESIGNER finishes
+    if (iteration.design_tokens_json) {
+      let prettyTokens = iteration.design_tokens_json;
       try {
-        prettyTokens = JSON.stringify(JSON.parse(tokens), null, 2);
-      } catch {
-        // leave as-is
+        prettyTokens = JSON.stringify(JSON.parse(iteration.design_tokens_json), null, 2);
+      } catch { /* leave as-is */ }
+      files.push({
+        path: "design-tokens.json",
+        type: "json",
+        content: prettyTokens,
+        source: "designer",
+      });
+    }
+
+    // Composer sections (mid-stream visibility)
+    // Even before the iteration is assembled, each completed COMPOSER subtask
+    // contributes a virtual component file.
+    if (iteration.orchestrator_run_id) {
+      const subtasks = await env.DB
+        .prepare(
+          `SELECT id, agent_name, title, status, output
+           FROM agent_subtasks
+           WHERE pipeline_run_id = ?
+             AND agent_name = 'composer'
+             AND status = 'done'
+             AND output IS NOT NULL
+           ORDER BY short_id ASC`
+        )
+        .bind(iteration.orchestrator_run_id)
+        .all<SubtaskRow>();
+
+      for (const t of subtasks.results ?? []) {
+        if (!t.output) continue;
+        const slug = slugifyTitle(t.title);
+        files.push({
+          path: `components/${slug}.html`,
+          type: "html",
+          content: t.output,
+          source: "composer",
+        });
       }
-      files.push({ path: "design-tokens.json", type: "json", content: prettyTokens });
+    }
+
+    // Final assembled output — available when ASSEMBLER finishes
+    if (iteration.page_html) {
+      const styles = extractStyleTag(iteration.page_html);
+      const jsx = extractReactComponent(iteration.page_html);
+
+      files.push({
+        path: "pages/index.html",
+        type: "html",
+        content: iteration.page_html,
+        source: "iteration",
+      });
+
+      if (styles) {
+        files.push({
+          path: "stylesheets/styles.css",
+          type: "css",
+          content: styles,
+          source: "iteration",
+        });
+      }
+      if (jsx) {
+        files.push({
+          path: "components/app.jsx",
+          type: "jsx",
+          content: jsx,
+          source: "iteration",
+        });
+      }
     }
 
     return Response.json({
