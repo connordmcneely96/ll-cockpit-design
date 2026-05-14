@@ -1,4 +1,4 @@
-import { headers } from "next/headers";
+import { cookies } from "next/headers";
 import { cockpitFetch } from "@/lib/cockpit-api";
 import CanvasClient from "./CanvasClient";
 
@@ -52,10 +52,12 @@ export default async function CanvasPage({
   params: Promise<{ briefId: string }>;
 }) {
   const { briefId } = await params;
-  const headerStore = await headers();
-  const token = headerStore.get("x-supabase-token") ?? "";
 
-  // /design/new is the intake placeholder — 18D wires the full form
+  // Token lives in the httpOnly cookie set by middleware on the ?token= entry flow
+  const cookieStore = await cookies();
+  const token = cookieStore.get("sb-access-token")?.value ?? "";
+
+  // /design/new is the intake placeholder — 18D wires the full pre-flight form
   if (briefId === "new") {
     return (
       <div
