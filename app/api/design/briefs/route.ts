@@ -34,7 +34,7 @@ export async function GET() {
   }
 
   try {
-    const { env } = getCloudflareContext() as { env: Env }
+    const env = getCloudflareContext().env as unknown as Env
     const rows = await env.DB
       .prepare(
         `SELECT id, client_name, project_name, status, created_at, updated_at
