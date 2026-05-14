@@ -5,15 +5,13 @@ import CanvasClient from "./CanvasClient";
 
 export type Subtask = {
   id: string;
-  agent: string;
+  agent: string;        // mapped from agent_name in D1
   status: string;
-  short_id: number;
+  short_id: string;     // D1 stores as TEXT like 'st_1'
   output?: string;
   cost_usd?: number;
 };
 
-// Status union matches what CanvasClient + CodeViewer + StatusBadge expect.
-// preview_ready from D1 is normalized to "done" before passing downstream.
 export type Brief = {
   id: string;
   client_name?: string;
@@ -50,58 +48,85 @@ type Env = {
   };
 };
 
-// Raw D1 row — status may be preview_ready before normalization
 type BriefRaw = Omit<Brief, "status"> & { status: string };
+
+// Raw row shape from agent_subtasks — must match D1 column names exactly
+type SubtaskRaw = {
+  id: string;
+  agent_name: string;
+  status: string;
+  short_id: string;
+  output: string | null;
+  cost_usd: number | null;
+};
 
 async function fetchBriefDetail(
   briefId: string,
   userId: string
 ): Promise<BriefDetail | null> {
-  try {
-    const env = getCloudflareContext().env as unknown as Env;
+  const env = getCloudflareContext().env as unknown as Env;
 
-    const raw = await env.DB
+  let raw: BriefRaw | null;
+  try {
+    raw = await env.DB
       .prepare(`SELECT * FROM design_briefs WHERE id = ? AND user_id = ?`)
       .bind(briefId, userId)
       .first<BriefRaw>();
+  } catch (err) {
+    console.error("fetchBriefDetail: design_briefs query failed", err);
+    return null;
+  }
 
-    if (!raw) return null;
+  if (!raw) return null;
 
-    // Normalize status — preview_ready → done for UI display
-    const brief: Brief = {
-      ...raw,
-      status:
-        raw.status === "building" ? "building"
-        : raw.status === "error" ? "error"
-        : "done",
-    };
+  const brief: Brief = {
+    ...raw,
+    status:
+      raw.status === "building" ? "building"
+      : raw.status === "error" ? "error"
+      : "done",
+  };
 
-    let subtasks: Subtask[] = [];
-    let run = null;
+  let subtasks: Subtask[] = [];
+  let run: BriefDetail["run"] = null;
 
-    if (brief.orchestrator_run_id) {
+  if (brief.orchestrator_run_id) {
+    try {
       const subtaskRows = await env.DB
         .prepare(
-          `SELECT id, agent, status, short_id, output, cost_usd
+          `SELECT id, agent_name, status, short_id, output, cost_usd
            FROM agent_subtasks
            WHERE pipeline_run_id = ?
            ORDER BY short_id ASC`
         )
         .bind(brief.orchestrator_run_id)
-        .all<Subtask>();
-      subtasks = subtaskRows.results ?? [];
+        .all<SubtaskRaw>();
 
-      const runRow = await env.DB
-        .prepare(`SELECT * FROM orchestrator_runs WHERE id = ?`)
-        .bind(brief.orchestrator_run_id)
-        .first<{ id: string; status: string; subtasks_total: number; subtasks_done: number }>();
-      run = runRow ?? null;
+      subtasks = (subtaskRows.results ?? []).map((r) => ({
+        id: r.id,
+        agent: r.agent_name,
+        status: r.status,
+        short_id: r.short_id,
+        output: r.output ?? undefined,
+        cost_usd: r.cost_usd ?? undefined,
+      }));
+    } catch (err) {
+      console.error("fetchBriefDetail: agent_subtasks query failed", err);
+      // Non-fatal — render canvas with empty subtasks
     }
 
-    return { brief, subtasks, run };
-  } catch {
-    return null;
+    try {
+      run = await env.DB
+        .prepare(`SELECT id, status, subtasks_total, subtasks_done FROM orchestrator_runs WHERE id = ?`)
+        .bind(brief.orchestrator_run_id)
+        .first<{ id: string; status: string; subtasks_total: number; subtasks_done: number }>();
+    } catch (err) {
+      console.error("fetchBriefDetail: orchestrator_runs query failed", err);
+      // Non-fatal
+    }
   }
+
+  return { brief, subtasks, run };
 }
 
 export default async function CanvasPage({
