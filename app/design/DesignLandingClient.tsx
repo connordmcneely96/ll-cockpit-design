@@ -1,6 +1,7 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import LeftPaneClient from "./LeftPaneClient";
 
 const RIGHT_TABS = ["Designs", "Examples", "Design systems"] as const;
@@ -10,20 +11,41 @@ type Brief = {
   id: string;
   project_name?: string;
   client_name?: string;
-  created_at: string;
+  created_at: string | number;
+  status?: string;
 };
 
-function daysAgo(dateStr: string): string {
-  const diff = Date.now() - new Date(dateStr).getTime();
+function daysAgo(dateVal: string | number): string {
+  const ms = typeof dateVal === "number" ? dateVal * 1000 : new Date(dateVal).getTime();
+  const diff = Date.now() - ms;
   const days = Math.floor(diff / 86400000);
   if (days === 0) return "today";
   if (days === 1) return "1 day ago";
   return `${days} days ago`;
 }
 
-export default function DesignLandingClient({ briefs }: { briefs: Brief[] }) {
+export default function DesignLandingClient() {
+  const router = useRouter();
   const [rightTab, setRightTab] = useState<RightTab>("Designs");
   const [designsSubTab, setDesignsSubTab] = useState<"Recent" | "Your designs">("Recent");
+  const [briefs, setBriefs] = useState<Brief[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [sessionExpired, setSessionExpired] = useState(false);
+
+  useEffect(() => {
+    fetch("/api/design/briefs")
+      .then((r) => {
+        if (r.status === 401) { setSessionExpired(true); setLoading(false); return null; }
+        return r.json();
+      })
+      .then((data) => {
+        if (data) {
+          setBriefs(Array.isArray(data.briefs) ? data.briefs : []);
+          setLoading(false);
+        }
+      })
+      .catch(() => setLoading(false));
+  }, []);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100vh", overflow: "hidden" }}>
@@ -54,6 +76,22 @@ export default function DesignLandingClient({ briefs }: { briefs: Brief[] }) {
           Beta
         </span>
         <div style={{ flex: 1 }} />
+        {sessionExpired && (
+          <button
+            onClick={() => router.push("https://ll-cockpit.connorpattern.workers.dev/api/design/launch")}
+            style={{
+              fontSize: 12,
+              color: "var(--design-terracotta)",
+              background: "var(--design-terracotta-soft)",
+              border: "1px solid var(--design-terracotta)",
+              borderRadius: 6,
+              padding: "4px 10px",
+              cursor: "pointer",
+            }}
+          >
+            Session expired — re-authenticate
+          </button>
+        )}
         <div
           style={{
             width: 28,
@@ -132,7 +170,12 @@ export default function DesignLandingClient({ briefs }: { briefs: Brief[] }) {
           {/* Right tab content */}
           <div style={{ padding: 24, flex: 1 }}>
             {rightTab === "Designs" && (
-              <DesignsTab briefs={briefs} subTab={designsSubTab} setSubTab={setDesignsSubTab} />
+              <DesignsTab
+                briefs={briefs}
+                loading={loading}
+                subTab={designsSubTab}
+                setSubTab={setDesignsSubTab}
+              />
             )}
             {rightTab === "Examples" && (
               <div
@@ -158,10 +201,12 @@ export default function DesignLandingClient({ briefs }: { briefs: Brief[] }) {
 
 function DesignsTab({
   briefs,
+  loading,
   subTab,
   setSubTab,
 }: {
   briefs: Brief[];
+  loading: boolean;
   subTab: "Recent" | "Your designs";
   setSubTab: (t: "Recent" | "Your designs") => void;
 }) {
@@ -215,14 +260,7 @@ function DesignsTab({
             overflow: "hidden",
           }}
         >
-          <div
-            style={{
-              background: "#e8f0f8",
-              height: 100,
-              display: "grid",
-              placeItems: "center",
-            }}
-          >
+          <div style={{ background: "#e8f0f8", height: 100, display: "grid", placeItems: "center" }}>
             <svg width="40" height="40" viewBox="0 0 40 40" fill="none" stroke="var(--design-ink)" strokeWidth="1.5">
               <circle cx="20" cy="10" r="5" />
               <line x1="20" y1="5" x2="20" y2="3" />
@@ -235,39 +273,72 @@ function DesignsTab({
             <div style={{ fontWeight: 600, fontSize: 14, color: "var(--design-ink)", marginBottom: 4 }}>
               Learn about Design Build
             </div>
-            <div
-              style={{ color: "var(--design-terracotta)", fontSize: 13, cursor: "pointer" }}
-              onClick={() => console.log("Quick tutorial")}
-            >
+            <div style={{ color: "var(--design-terracotta)", fontSize: 13, cursor: "pointer" }}>
               Quick tutorial
             </div>
           </div>
         </div>
 
+        {/* Loading skeletons */}
+        {loading && [1, 2, 3].map((n) => (
+          <div
+            key={n}
+            style={{
+              border: "1px solid var(--design-border)",
+              borderRadius: 8,
+              width: 200,
+              height: 80,
+              background: "var(--design-bg2)",
+              animation: "pulse 1.5s ease-in-out infinite",
+            }}
+          />
+        ))}
+
         {/* Brief cards */}
-        {briefs.map((brief) => (
+        {!loading && briefs.map((brief) => (
           <a
             key={brief.id}
             href={`/design/${brief.id}`}
             style={{
               border: "1px solid var(--design-border)",
               borderRadius: 8,
-              padding: 12,
-              fontSize: 13,
+              padding: 0,
               width: 200,
               display: "block",
               color: "var(--design-ink)",
               textDecoration: "none",
+              overflow: "hidden",
             }}
           >
-            <div style={{ fontWeight: 500, marginBottom: 4 }}>
-              {brief.project_name || brief.client_name || "Untitled"}
+            {/* Card preview area */}
+            <div
+              style={{
+                height: 80,
+                background: "linear-gradient(135deg, var(--design-terracotta-soft) 0%, var(--design-bg2) 100%)",
+                display: "grid",
+                placeItems: "center",
+                fontSize: 22,
+              }}
+            >
+              🎨
             </div>
-            <div style={{ color: "var(--design-ink3)", fontSize: 12 }}>
-              {daysAgo(brief.created_at)}
+            <div style={{ padding: "10px 12px" }}>
+              <div style={{ fontWeight: 500, fontSize: 13, marginBottom: 3 }}>
+                {brief.project_name || brief.client_name || "Untitled"}
+              </div>
+              <div style={{ color: "var(--design-ink3)", fontSize: 11 }}>
+                {daysAgo(brief.created_at)}
+              </div>
             </div>
           </a>
         ))}
+
+        {/* Empty state */}
+        {!loading && briefs.length === 0 && (
+          <div style={{ fontSize: 13, color: "var(--design-ink3)", paddingTop: 8 }}>
+            No designs yet. Click + Create to start your first project.
+          </div>
+        )}
       </div>
     </div>
   );
@@ -279,8 +350,6 @@ function DesignSystemsTab() {
       <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 16, color: "var(--design-ink)" }}>
         Design Systems
       </div>
-
-      {/* Create card */}
       <div
         style={{
           border: "1px solid var(--design-border)",
@@ -301,7 +370,6 @@ function DesignSystemsTab() {
           </div>
         </div>
         <button
-          onClick={() => console.log("Create design system")}
           style={{
             border: "1px solid var(--design-border)",
             borderRadius: 6,
@@ -315,8 +383,6 @@ function DesignSystemsTab() {
           Create
         </button>
       </div>
-
-      {/* Templates */}
       <div style={{ fontSize: 14, fontWeight: 600, color: "var(--design-ink)", marginBottom: 12 }}>
         Templates
       </div>
@@ -332,7 +398,6 @@ function DesignSystemsTab() {
       >
         No templates yet. Create one from any project via the Share menu → File type.
       </div>
-
       <div style={{ fontSize: 12, color: "var(--design-ink3)", marginTop: 12 }}>
         Only you can view these settings.
       </div>
