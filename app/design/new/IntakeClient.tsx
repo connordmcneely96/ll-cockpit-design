@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, type FormEvent } from "react";
+import { useState, type FormEvent } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 
 const SKILLS = [
@@ -17,12 +17,10 @@ export default function IntakeClient() {
   const router = useRouter();
   const searchParams = useSearchParams();
 
-  // Pre-fill from query params set by LeftPaneClient
   const projectType = searchParams.get("type") ?? "prototype";
   const initialName = searchParams.get("name") ?? "";
-  const fidelity = searchParams.get("fidelity"); // wireframe | high-fidelity (Prototype tab only)
+  const fidelity = searchParams.get("fidelity");
 
-  // Map fidelity → default skill
   const defaultSkill: SkillId =
     fidelity === "wireframe" ? "wireframe"
     : projectType === "slide-deck" ? "make_a_deck"
@@ -34,16 +32,13 @@ export default function IntakeClient() {
   const [targetAudience, setTargetAudience] = useState("");
   const [moodTone, setMoodTone] = useState("");
   const [mustHaveSections, setMustHaveSections] = useState("");
-  const [styleRefs, setStyleRefs] = useState(""); // newline-separated URLs
+  const [styleRefs, setStyleRefs] = useState("");
   const [brandColors, setBrandColors] = useState("");
   const [constraints, setConstraints] = useState("");
   const [selectedSkill, setSelectedSkill] = useState<SkillId>(defaultSkill);
 
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-
-  // Auto-resize textareas on content
-  useEffect(() => { /* placeholder for future autosize */ }, []);
 
   const projectTypeLabel =
     projectType === "slide-deck" ? "slide deck"
@@ -55,7 +50,6 @@ export default function IntakeClient() {
     e.preventDefault();
     setError(null);
 
-    // Required field guard
     if (!clientName.trim() || !businessDescription.trim() || !targetAudience.trim()
         || !moodTone.trim() || !mustHaveSections.trim()) {
       setError("Please fill in all required fields (marked *).");
@@ -89,13 +83,18 @@ export default function IntakeClient() {
       const data = await res.json().catch(() => ({}));
 
       if (!res.ok || !data?.brief_id) {
-        const detail = data?.error ?? data?.detail ?? "unknown_error";
+        // Surface the actual ll-cockpit error from `detail` first, then upstream_status,
+        // then fall back to our generic error code as last resort.
+        const detail =
+          data?.detail
+          ?? data?.upstream_status
+          ?? data?.error
+          ?? "unknown_error";
         setError(`Failed to create brief: ${detail}`);
         setSubmitting(false);
         return;
       }
 
-      // Navigate to canvas — pipeline runs in background, canvas polls/watches subtasks
       router.push(`/design/${data.brief_id}`);
     } catch (err) {
       setError(err instanceof Error ? err.message : "request_failed");
@@ -112,7 +111,6 @@ export default function IntakeClient() {
         fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
       }}
     >
-      {/* Header */}
       <header
         style={{
           height: 48,
@@ -156,7 +154,6 @@ export default function IntakeClient() {
         </span>
       </header>
 
-      {/* Form body */}
       <form
         onSubmit={handleSubmit}
         style={{
@@ -165,7 +162,6 @@ export default function IntakeClient() {
           padding: "32px 24px 80px",
         }}
       >
-        {/* Skills row */}
         <Section
           label="What kind of design?"
           help="Influences how the agents approach generation."
@@ -195,13 +191,8 @@ export default function IntakeClient() {
           </div>
         </Section>
 
-        {/* Required fields */}
         <Section label="Client name" required>
-          <Input
-            value={clientName}
-            onChange={setClientName}
-            placeholder="Acme Corp"
-          />
+          <Input value={clientName} onChange={setClientName} placeholder="Acme Corp" />
         </Section>
 
         <Section
@@ -251,7 +242,6 @@ export default function IntakeClient() {
           />
         </Section>
 
-        {/* Optional fields */}
         <Section
           label="Style references"
           help="One URL per line. Sites whose design you admire."
@@ -288,7 +278,6 @@ export default function IntakeClient() {
           />
         </Section>
 
-        {/* Error banner */}
         {error && (
           <div
             style={{
@@ -299,13 +288,14 @@ export default function IntakeClient() {
               borderRadius: 6,
               fontSize: 13,
               marginBottom: 16,
+              whiteSpace: "pre-wrap",
+              wordBreak: "break-word",
             }}
           >
             {error}
           </div>
         )}
 
-        {/* Submit row */}
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 12, paddingTop: 8 }}>
           <button
             type="button"
