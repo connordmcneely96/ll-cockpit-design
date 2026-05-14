@@ -1,10 +1,9 @@
 /**
  * GET /api/design/briefs — list user's briefs (direct D1 query)
- * POST /api/design/briefs — create new brief (proxies to ll-cockpit which runs the pipeline)
+ * POST /api/design/briefs — create new brief (calls ll-cockpit via service binding)
  *
- * Per Sprint 20 ADR: design Worker shares ll-cockpit-db D1 binding.
- * GET reads D1 directly. POST proxies to ll-cockpit because the pipeline
- * orchestrator + buildDesignBuildDAG + runAutoWave live there.
+ * Per Sprint 20 ADR: cross-Worker calls go through service bindings (env.HUB),
+ * not via public URL. Public-URL calls between Workers cause Cloudflare error 1042.
  */
 import { cookies } from 'next/headers'
 import { validateToken } from '@/lib/auth'
@@ -21,9 +20,10 @@ type Env = {
       }
     }
   }
+  HUB: {
+    fetch: (input: string | Request, init?: RequestInit) => Promise<Response>
+  }
 }
-
-const COCKPIT_BASE = 'https://ll-cockpit.connorpattern.workers.dev'
 
 export async function GET() {
   const cookieStore = await cookies()
@@ -94,7 +94,6 @@ export async function POST(req: Request) {
     return Response.json({ error: 'invalid_json' }, { status: 400 })
   }
 
-  // Required field check before proxying
   const required: Array<keyof CreateBriefBody> = [
     'client_name', 'business_description', 'target_audience',
     'mood_tone', 'must_have_sections',
@@ -106,38 +105,52 @@ export async function POST(req: Request) {
     }
   }
 
-  // Proxy to ll-cockpit's POST /api/design/briefs which:
-  //  1. inserts design_briefs row
-  //  2. builds DESIGNER → COMPOSER × N → ASSEMBLER → CRITIC DAG
-  //  3. fires runAutoWave (the actual pipeline)
-  //  4. returns brief_id + run_id
+  // Call ll-cockpit via service binding (not public URL — that causes 1042)
   try {
-    const proxyRes = await fetch(`${COCKPIT_BASE}/api/design/briefs`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${token}`,
-      },
-      body: JSON.stringify(body),
-    })
+    const env = getCloudflareContext().env as unknown as Env
 
-    if (!proxyRes.ok) {
-      const errText = await proxyRes.text()
-      console.error('cockpit POST /api/design/briefs failed', proxyRes.status, errText)
+    const hubRes = await env.HUB.fetch(
+      'https://ll-cockpit.connorpattern.workers.dev/api/design/briefs',
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify(body),
+      }
+    )
+
+    if (!hubRes.ok) {
+      const errText = await hubRes.text()
+      console.error('hub POST /api/design/briefs failed', hubRes.status, errText)
       return Response.json(
-        { error: 'pipeline_dispatch_failed', detail: errText },
-        { status: proxyRes.status }
+        {
+          error: 'pipeline_dispatch_failed',
+          upstream_status: hubRes.status,
+          detail: errText,
+        },
+        { status: hubRes.status }
       )
     }
 
-    const cockpitData = await proxyRes.json()
+    const hubData = await hubRes.json() as {
+      brief_id?: string
+      orchestrator_run_id?: string
+      subtask_count?: number
+    }
 
-    // After successful pipeline kick-off, update our local D1 row with
-    // skill_hint + project_type (ll-cockpit POST doesn't accept these yet,
-    // so we patch them in here).
+    if (!hubData?.brief_id) {
+      console.error('hub returned no brief_id', hubData)
+      return Response.json(
+        { error: 'no_brief_id_returned', detail: JSON.stringify(hubData) },
+        { status: 502 }
+      )
+    }
+
+    // Patch skill_hint + project_type into the brief row we just inserted
     if (body.skill_hint || body.project_type) {
       try {
-        const env = getCloudflareContext().env as unknown as Env
         await env.DB
           .prepare(
             `UPDATE design_briefs
@@ -150,26 +163,25 @@ export async function POST(req: Request) {
             body.skill_hint ?? null,
             body.project_type ?? null,
             Math.floor(Date.now() / 1000),
-            cockpitData.brief_id,
+            hubData.brief_id,
             auth.userId
           )
           .run()
       } catch (err) {
-        // Non-fatal — brief is created, just missing hint columns
         console.error('skill_hint UPDATE failed (non-fatal)', err)
       }
     }
 
     return Response.json({
       ok: true,
-      brief_id: cockpitData.brief_id,
-      orchestrator_run_id: cockpitData.orchestrator_run_id,
-      subtask_count: cockpitData.subtask_count,
+      brief_id: hubData.brief_id,
+      orchestrator_run_id: hubData.orchestrator_run_id,
+      subtask_count: hubData.subtask_count,
     })
   } catch (err) {
-    console.error('briefs POST proxy error', err)
+    console.error('briefs POST service binding error', err)
     return Response.json(
-      { error: err instanceof Error ? err.message : 'proxy_failed' },
+      { error: err instanceof Error ? err.message : 'service_binding_failed' },
       { status: 500 }
     )
   }
