@@ -10,12 +10,13 @@ export async function middleware(request: NextRequest) {
     return NextResponse.next();
   }
 
-  // Initial entry from Cockpit: ?token= sets cookie, redirects to clean URL
+  // Initial entry from Cockpit: ?token= sets cookie, then redirects.
+  // Optional ?next= param overrides the redirect destination (e.g. /design/[briefId])
   const queryToken = searchParams.get("token");
   if (queryToken) {
-    const url = request.nextUrl.clone();
-    url.searchParams.delete("token");
-    const response = NextResponse.redirect(url);
+    const nextPath = searchParams.get("next") ?? "/design";
+    const redirectUrl = new URL(nextPath, request.nextUrl.origin);
+    const response = NextResponse.redirect(redirectUrl);
     response.cookies.set("sb-access-token", queryToken, {
       httpOnly: true,
       secure: true,
