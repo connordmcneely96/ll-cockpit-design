@@ -11,11 +11,16 @@ import { getCloudflareContext } from '@opennextjs/cloudflare'
 export const dynamic = 'force-dynamic'
 
 type Env = {
-  DB: D1Database
+  DB: {
+    prepare: (sql: string) => {
+      bind: (...args: unknown[]) => {
+        all: () => Promise<{ results: unknown[] }>
+      }
+    }
+  }
 }
 
 export async function GET() {
-  // Validate session
   const cookieStore = await cookies()
   const token = cookieStore.get('sb-access-token')?.value
 
@@ -28,7 +33,6 @@ export async function GET() {
     return Response.json({ briefs: [], error: 'invalid_token' }, { status: 401 })
   }
 
-  // Query D1 directly — design Worker shares ll-cockpit-db binding
   try {
     const { env } = getCloudflareContext() as { env: Env }
     const rows = await env.DB
