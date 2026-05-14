@@ -1,58 +1,62 @@
 "use client";
 
-type Props = {
-  selectedFile: string | null;
-  onSelectFile: (file: string) => void;
-};
+import { useEffect, useState } from "react";
 
-type TreeFile = {
-  name: string;
+export type DesignFile = {
   path: string;
+  type: "html" | "css" | "jsx" | "json";
+  content: string;
 };
 
-type TreeSection = {
+type Props = {
+  briefId: string;
+  selectedFile: string | null;
+  onSelectFile: (path: string) => void;
+  onFilesLoaded: (files: DesignFile[]) => void;
+};
+
+type Section = {
   label: string;
-  icon: string;
-  files: TreeFile[];
+  prefix: string;
 };
 
-// Static shell — 18C wires real files from design_brief_files D1 table
-const TREE: TreeSection[] = [
-  {
-    label: "PAGES",
-    icon: "⬜",
-    files: [
-      { name: "index.html", path: "pages/index.html" },
-    ],
-  },
-  {
-    label: "COMPONENTS",
-    icon: "⬡",
-    files: [
-      { name: "app.jsx", path: "components/app.jsx" },
-    ],
-  },
-  {
-    label: "STYLESHEETS",
-    icon: "◈",
-    files: [
-      { name: "styles.css", path: "stylesheets/styles.css" },
-    ],
-  },
+const SECTIONS: Section[] = [
+  { label: "PAGES", prefix: "pages/" },
+  { label: "COMPONENTS", prefix: "components/" },
+  { label: "STYLESHEETS", prefix: "stylesheets/" },
+  { label: "TOKENS", prefix: "design-tokens" },
 ];
 
-export default function FileTree({ selectedFile, onSelectFile }: Props) {
+export default function FileTree({ briefId, selectedFile, onSelectFile, onFilesLoaded }: Props) {
+  const [files, setFiles] = useState<DesignFile[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`/api/design/briefs/${briefId}/files`)
+      .then((r) => r.json())
+      .then((data) => {
+        if (cancelled) return;
+        const list = Array.isArray(data?.files) ? data.files : [];
+        setFiles(list);
+        onFilesLoaded(list);
+        setLoading(false);
+        // Auto-select first file if nothing selected yet
+        if (list.length > 0 && !selectedFile) {
+          onSelectFile(list[0].path);
+        }
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setError(err instanceof Error ? err.message : "fetch_failed");
+        setLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [briefId]);  // eslint-disable-line react-hooks/exhaustive-deps
+
   return (
-    <div
-      style={{
-        display: "flex",
-        flexDirection: "column",
-        height: "100%",
-        overflow: "hidden",
-        background: "var(--design-bg)",
-      }}
-    >
-      {/* Header */}
+    <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden", background: "var(--design-bg)" }}>
       <div
         style={{
           padding: "10px 12px 8px",
@@ -68,74 +72,80 @@ export default function FileTree({ selectedFile, onSelectFile }: Props) {
         Files
       </div>
 
-      {/* Tree */}
       <div style={{ flex: 1, overflowY: "auto", padding: "8px 0" }}>
-        {TREE.map((section) => (
-          <div key={section.label}>
-            {/* Section header */}
-            <div
-              style={{
-                padding: "6px 12px 3px",
-                fontSize: 10,
-                fontWeight: 600,
-                color: "var(--design-ink3)",
-                letterSpacing: "0.08em",
-                textTransform: "uppercase",
-                display: "flex",
-                alignItems: "center",
-                gap: 6,
-              }}
-            >
-              <span>{section.icon}</span>
-              {section.label}
-            </div>
-
-            {/* Files */}
-            {section.files.map((file) => {
-              const isSelected = selectedFile === file.path;
-              return (
-                <button
-                  key={file.path}
-                  onClick={() => onSelectFile(file.path)}
-                  style={{
-                    width: "100%",
-                    background: isSelected ? "var(--design-terracotta-soft)" : "transparent",
-                    border: "none",
-                    borderLeft: isSelected
-                      ? "2px solid var(--design-terracotta)"
-                      : "2px solid transparent",
-                    padding: "5px 12px 5px 20px",
-                    textAlign: "left",
-                    fontSize: 12,
-                    color: isSelected ? "var(--design-terracotta)" : "var(--design-ink2)",
-                    cursor: "pointer",
-                    fontWeight: isSelected ? 500 : 400,
-                    display: "block",
-                    overflow: "hidden",
-                    textOverflow: "ellipsis",
-                    whiteSpace: "nowrap",
-                  }}
-                >
-                  {file.name}
-                </button>
-              );
-            })}
+        {loading && (
+          <div style={{ padding: "8px 12px", fontSize: 11, color: "var(--design-ink3)" }}>
+            Loading files...
           </div>
-        ))}
+        )}
 
-        {/* Empty state note */}
-        <div
-          style={{
-            padding: "16px 12px",
-            fontSize: 11,
-            color: "var(--design-ink3)",
-            lineHeight: 1.6,
-            borderTop: "1px solid var(--design-border)",
-            marginTop: 8,
-          }}
-        >
-          Files populate as your design builds. Live wiring in Sprint 18C.
-        </div>
+        {error && (
+          <div style={{ padding: "8px 12px", fontSize: 11, color: "#991b1b" }}>
+            {error}
+          </div>
+        )}
+
+        {!loading && !error && files.length === 0 && (
+          <div style={{ padding: "8px 12px", fontSize: 11, color: "var(--design-ink3)", lineHeight: 1.6 }}>
+            No files yet. Pipeline output will populate here once the build completes.
+          </div>
+        )}
+
+        {!loading && !error && SECTIONS.map((section) => {
+          const sectionFiles = files.filter((f) =>
+            section.prefix.endsWith("/")
+              ? f.path.startsWith(section.prefix)
+              : f.path.startsWith(section.prefix)
+          );
+          if (sectionFiles.length === 0) return null;
+
+          return (
+            <div key={section.label}>
+              <div
+                style={{
+                  padding: "8px 12px 3px",
+                  fontSize: 10,
+                  fontWeight: 600,
+                  color: "var(--design-ink3)",
+                  letterSpacing: "0.08em",
+                  textTransform: "uppercase",
+                }}
+              >
+                {section.label}
+              </div>
+              {sectionFiles.map((file) => {
+                const isSelected = selectedFile === file.path;
+                const filename = file.path.split("/").pop() ?? file.path;
+                return (
+                  <button
+                    key={file.path}
+                    onClick={() => onSelectFile(file.path)}
+                    style={{
+                      width: "100%",
+                      background: isSelected ? "var(--design-terracotta-soft)" : "transparent",
+                      border: "none",
+                      borderLeft: isSelected
+                        ? "2px solid var(--design-terracotta)"
+                        : "2px solid transparent",
+                      padding: "5px 12px 5px 20px",
+                      textAlign: "left",
+                      fontSize: 12,
+                      color: isSelected ? "var(--design-terracotta)" : "var(--design-ink2)",
+                      cursor: "pointer",
+                      fontWeight: isSelected ? 500 : 400,
+                      display: "block",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    {filename}
+                  </button>
+                );
+              })}
+            </div>
+          );
+        })}
       </div>
     </div>
   );
