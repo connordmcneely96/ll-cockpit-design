@@ -12,6 +12,8 @@ export type Subtask = {
   cost_usd?: number;
 };
 
+// Status union matches what CanvasClient + CodeViewer + StatusBadge expect.
+// preview_ready from D1 is normalized to "done" before passing downstream.
 export type Brief = {
   id: string;
   client_name?: string;
@@ -19,7 +21,7 @@ export type Brief = {
   target_audience?: string;
   mood_tone?: string;
   must_have_sections?: string;
-  status: "building" | "done" | "error" | "preview_ready";
+  status: "building" | "done" | "error";
   current_iteration?: number;
   orchestrator_run_id?: string;
   created_at: number;
@@ -48,6 +50,9 @@ type Env = {
   };
 };
 
+// Raw D1 row — status may be preview_ready before normalization
+type BriefRaw = Omit<Brief, "status"> & { status: string };
+
 async function fetchBriefDetail(
   briefId: string,
   userId: string
@@ -55,19 +60,22 @@ async function fetchBriefDetail(
   try {
     const env = getCloudflareContext().env as unknown as Env;
 
-    const brief = await env.DB
+    const raw = await env.DB
       .prepare(`SELECT * FROM design_briefs WHERE id = ? AND user_id = ?`)
       .bind(briefId, userId)
-      .first<Brief>();
+      .first<BriefRaw>();
 
-    if (!brief) return null;
+    if (!raw) return null;
 
-    // Normalize status — preview_ready maps to done for UI display
-    if ((brief.status as string) === "preview_ready") {
-      brief.status = "done";
-    }
+    // Normalize status — preview_ready → done for UI display
+    const brief: Brief = {
+      ...raw,
+      status:
+        raw.status === "building" ? "building"
+        : raw.status === "error" ? "error"
+        : "done",
+    };
 
-    // Fetch subtasks if pipeline ran
     let subtasks: Subtask[] = [];
     let run = null;
 
@@ -103,7 +111,6 @@ export default async function CanvasPage({
 }) {
   const { briefId } = await params;
 
-  // /design/new is the intake placeholder — 18D wires the full pre-flight form
   if (briefId === "new") {
     return (
       <div
@@ -131,7 +138,6 @@ export default async function CanvasPage({
     );
   }
 
-  // Validate session
   const cookieStore = await cookies();
   const token = cookieStore.get("sb-access-token")?.value ?? "";
   const auth = token ? await validateToken(token) : null;
