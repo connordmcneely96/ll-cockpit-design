@@ -4,8 +4,10 @@ import { validateToken } from "@/lib/auth";
 export async function middleware(request: NextRequest) {
   const { pathname, searchParams } = request.nextUrl;
 
-  // Public paths bypass auth entirely
-  const publicPaths = ["/api/health", "/api/auth"];
+  // API routes and public paths handle their own auth — bypass middleware entirely.
+  // This prevents client-side fetch("/api/design/briefs") from being redirected
+  // to cockpit when the page-level session cookie is stale.
+  const publicPaths = ["/api/", "/favicon.ico"];
   if (publicPaths.some((p) => pathname.startsWith(p))) {
     return NextResponse.next();
   }
@@ -27,7 +29,7 @@ export async function middleware(request: NextRequest) {
     return response;
   }
 
-  // Every subsequent request: validate cookie content, not just presence
+  // Page routes: validate cookie content, not just presence
   const cookieToken = request.cookies.get("sb-access-token")?.value;
   if (!cookieToken) return redirectToCockpit(request);
 
