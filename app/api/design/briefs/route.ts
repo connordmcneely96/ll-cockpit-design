@@ -1,14 +1,21 @@
 /**
- * GET /api/design/briefs — local proxy to ll-cockpit hub
- * Reads sb-access-token cookie, forwards as Authorization Bearer.
- * Called client-side by DesignLandingClient on mount.
+ * GET /api/design/briefs — direct D1 query from design Worker
+ *
+ * Per Sprint 20 ADR: design Worker shares ll-cockpit-db D1 binding.
+ * No proxy needed — query design_briefs directly.
  */
 import { cookies } from 'next/headers'
-import { cockpitFetch } from '@/lib/cockpit-api'
+import { validateToken } from '@/lib/auth'
+import { getCloudflareContext } from '@opennextjs/cloudflare'
 
 export const dynamic = 'force-dynamic'
 
+type Env = {
+  DB: D1Database
+}
+
 export async function GET() {
+  // Validate session
   const cookieStore = await cookies()
   const token = cookieStore.get('sb-access-token')?.value
 
@@ -16,17 +23,29 @@ export async function GET() {
     return Response.json({ briefs: [], error: 'no_session' }, { status: 401 })
   }
 
+  const auth = await validateToken(token)
+  if (!auth) {
+    return Response.json({ briefs: [], error: 'invalid_token' }, { status: 401 })
+  }
+
+  // Query D1 directly — design Worker shares ll-cockpit-db binding
   try {
-    const res = await cockpitFetch('/api/design/briefs?limit=30', token)
-    if (!res.ok) {
-      const text = await res.text()
-      return Response.json({ briefs: [], error: text }, { status: res.status })
-    }
-    const data = await res.json()
-    return Response.json({ briefs: Array.isArray(data?.briefs) ? data.briefs : [] })
+    const { env } = getCloudflareContext() as { env: Env }
+    const rows = await env.DB
+      .prepare(
+        `SELECT id, client_name, project_name, status, created_at, updated_at
+         FROM design_briefs
+         WHERE user_id = ?
+         ORDER BY created_at DESC
+         LIMIT 30`
+      )
+      .bind(auth.userId)
+      .all()
+
+    return Response.json({ briefs: rows.results ?? [] })
   } catch (err) {
     return Response.json(
-      { briefs: [], error: err instanceof Error ? err.message : 'fetch_failed' },
+      { briefs: [], error: err instanceof Error ? err.message : 'db_error' },
       { status: 500 }
     )
   }
