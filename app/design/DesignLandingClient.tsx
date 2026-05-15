@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import { useRouter } from "next/navigation";
 import LeftPaneClient from "./LeftPaneClient";
 
@@ -15,7 +15,6 @@ type Brief = {
   status?: string;
 };
 
-// Sprint 18E — design system from /api/design/systems
 type DesignSystem = {
   id: string;
   slug: string;
@@ -34,6 +33,51 @@ function daysAgo(dateVal: string | number): string {
   if (days === 0) return "today";
   if (days === 1) return "1 day ago";
   return `${days} days ago`;
+}
+
+/**
+ * Sprint 18E — shared hook for design systems fetch with seeding poll.
+ * Polls every 3s while server reports seeding:true, stops when populated
+ * or after MAX_POLLS (safeguard against runaway).
+ */
+function useDesignSystems() {
+  const [systems, setSystems] = useState<DesignSystem[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [seeding, setSeeding] = useState(false);
+  const pollCountRef = useRef(0);
+  const MAX_POLLS = 30; // 30 × 3s = 90s safety cap
+
+  useEffect(() => {
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    async function fetchOnce() {
+      try {
+        const r = await fetch("/api/design/systems");
+        const data = await r.json();
+        if (cancelled) return;
+        const list = Array.isArray(data.systems) ? data.systems : [];
+        setSystems(list);
+        const isSeeding = !!data.seeding && list.length === 0;
+        setSeeding(isSeeding);
+        setLoading(false);
+
+        if (isSeeding && pollCountRef.current < MAX_POLLS) {
+          pollCountRef.current++;
+          timer = setTimeout(fetchOnce, 3000);
+        }
+      } catch {
+        if (!cancelled) setLoading(false);
+      }
+    }
+    fetchOnce();
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, []);
+
+  return { systems, loading, seeding };
 }
 
 export default function DesignLandingClient() {
@@ -61,7 +105,6 @@ export default function DesignLandingClient() {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100vh", overflow: "hidden" }}>
-      {/* Header */}
       <header
         style={{
           height: 48,
@@ -122,9 +165,7 @@ export default function DesignLandingClient() {
         </div>
       </header>
 
-      {/* Body */}
       <div style={{ display: "flex", flex: 1, overflow: "hidden" }}>
-        {/* Left pane */}
         <div
           style={{
             width: 300,
@@ -139,7 +180,6 @@ export default function DesignLandingClient() {
           <LeftPaneClient />
         </div>
 
-        {/* Right pane */}
         <div
           style={{
             flex: 1,
@@ -149,7 +189,6 @@ export default function DesignLandingClient() {
             flexDirection: "column",
           }}
         >
-          {/* Right tab bar */}
           <div
             style={{
               display: "flex",
@@ -179,7 +218,6 @@ export default function DesignLandingClient() {
             ))}
           </div>
 
-          {/* Right tab content */}
           <div style={{ padding: 24, flex: 1 }}>
             {rightTab === "Designs" && (
               <DesignsTab
@@ -337,30 +375,19 @@ function DesignsTab({
 }
 
 /**
- * Sprint 18E — Examples tab.
- * Lists curated design systems from VoltAgent/awesome-design-md import.
- * Click "Build with this" → /design/new?system={slug} pre-fills the intake form.
+ * Sprint 18E — Examples tab. Uses shared useDesignSystems hook which
+ * polls while the library is auto-seeding.
  */
 function ExamplesTab({ router }: { router: ReturnType<typeof useRouter> }) {
-  const [systems, setSystems] = useState<DesignSystem[]>([]);
-  const [loading, setLoading] = useState(true);
+  const { systems, loading, seeding } = useDesignSystems();
   const [activeCategory, setActiveCategory] = useState<string>("all");
-
-  useEffect(() => {
-    fetch("/api/design/systems")
-      .then((r) => r.json())
-      .then((data) => {
-        setSystems(Array.isArray(data.systems) ? data.systems : []);
-        setLoading(false);
-      })
-      .catch(() => setLoading(false));
-  }, []);
 
   const categories = Array.from(new Set(systems.map((s) => s.category).filter(Boolean))) as string[];
   const filtered = activeCategory === "all"
     ? systems
     : systems.filter((s) => s.category === activeCategory);
 
+  // Initial load
   if (loading) {
     return (
       <div style={{ fontSize: 13, color: "var(--design-ink3)", padding: 16 }}>
@@ -369,10 +396,52 @@ function ExamplesTab({ router }: { router: ReturnType<typeof useRouter> }) {
     );
   }
 
+  // Background seed in progress
+  if (seeding && systems.length === 0) {
+    return (
+      <div style={{ padding: 16, maxWidth: 500 }}>
+        <div style={{ fontSize: 14, fontWeight: 600, color: "var(--design-ink)", marginBottom: 8 }}>
+          Building your library…
+        </div>
+        <div style={{ fontSize: 13, color: "var(--design-ink3)", marginBottom: 16, lineHeight: 1.5 }}>
+          This is a one-time setup. We&apos;re importing ~70 brand-inspired design systems from
+          our curated source. Should take 30-60 seconds.
+        </div>
+        <div
+          style={{
+            height: 4,
+            background: "var(--design-bg2)",
+            borderRadius: 2,
+            overflow: "hidden",
+            position: "relative",
+          }}
+        >
+          <div
+            style={{
+              position: "absolute",
+              top: 0,
+              left: 0,
+              bottom: 0,
+              width: "40%",
+              background: "var(--design-terracotta)",
+              animation: "slide 1.5s ease-in-out infinite",
+            }}
+          />
+        </div>
+        <style jsx>{`
+          @keyframes slide {
+            0% { transform: translateX(-100%); }
+            100% { transform: translateX(250%); }
+          }
+        `}</style>
+      </div>
+    );
+  }
+
   if (systems.length === 0) {
     return (
       <div style={{ fontSize: 13, color: "var(--design-ink3)", padding: 16 }}>
-        No design systems available yet. The admin needs to run the one-time seed.
+        Library is empty. Try refreshing the page — the first load triggers the import.
       </div>
     );
   }
@@ -388,7 +457,6 @@ function ExamplesTab({ router }: { router: ReturnType<typeof useRouter> }) {
         </div>
       </div>
 
-      {/* Category filter pills */}
       <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 18 }}>
         <button
           onClick={() => setActiveCategory("all")}
@@ -426,7 +494,6 @@ function ExamplesTab({ router }: { router: ReturnType<typeof useRouter> }) {
         ))}
       </div>
 
-      {/* System cards grid */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))", gap: 12 }}>
         {filtered.map((sys) => (
           <button
@@ -444,7 +511,6 @@ function ExamplesTab({ router }: { router: ReturnType<typeof useRouter> }) {
               flexDirection: "column",
             }}
           >
-            {/* Color preview band */}
             <div
               style={{
                 height: 80,
@@ -502,23 +568,8 @@ function ExamplesTab({ router }: { router: ReturnType<typeof useRouter> }) {
   );
 }
 
-/**
- * Sprint 18E — Design Systems tab. Same data source as Examples but
- * presented as a flat list with creation CTA for user-created systems (future).
- */
 function DesignSystemsTab({ router }: { router: ReturnType<typeof useRouter> }) {
-  const [systems, setSystems] = useState<DesignSystem[]>([]);
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    fetch("/api/design/systems")
-      .then((r) => r.json())
-      .then((data) => {
-        setSystems(Array.isArray(data.systems) ? data.systems : []);
-        setLoading(false);
-      })
-      .catch(() => setLoading(false));
-  }, []);
+  const { systems, loading, seeding } = useDesignSystems();
 
   return (
     <div>
@@ -563,13 +614,34 @@ function DesignSystemsTab({ router }: { router: ReturnType<typeof useRouter> }) 
 
       <div style={{ fontSize: 14, fontWeight: 600, color: "var(--design-ink)", marginBottom: 12 }}>
         Curated library ({systems.length})
+        {seeding && systems.length === 0 && (
+          <span style={{ fontSize: 12, fontWeight: 400, color: "var(--design-terracotta)", marginLeft: 8 }}>
+            — importing now, hang tight
+          </span>
+        )}
       </div>
 
       {loading && (
         <div style={{ fontSize: 13, color: "var(--design-ink3)" }}>Loading…</div>
       )}
 
-      {!loading && systems.length === 0 && (
+      {!loading && seeding && systems.length === 0 && (
+        <div
+          style={{
+            border: "1px solid var(--design-border)",
+            borderRadius: 6,
+            padding: 20,
+            color: "var(--design-ink3)",
+            fontSize: 13,
+            lineHeight: 1.5,
+          }}
+        >
+          One-time import in progress — pulling ~70 brand-inspired design systems
+          from our curated source. Updates automatically when ready (~30-60s).
+        </div>
+      )}
+
+      {!loading && !seeding && systems.length === 0 && (
         <div
           style={{
             border: "1px solid var(--design-border)",
@@ -580,7 +652,7 @@ function DesignSystemsTab({ router }: { router: ReturnType<typeof useRouter> }) 
             fontSize: 13,
           }}
         >
-          No design systems available yet. The admin needs to run the seed.
+          Library empty. Refresh to trigger import.
         </div>
       )}
 
