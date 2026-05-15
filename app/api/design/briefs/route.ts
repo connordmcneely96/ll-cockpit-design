@@ -4,6 +4,8 @@
  *
  * Per Sprint 20 ADR: cross-Worker calls go through service bindings (env.HUB),
  * not via public URL. Public-URL calls between Workers cause Cloudflare error 1042.
+ *
+ * Sprint 18E: POST forwards attached_design_system_slug to hub when provided.
  */
 import { cookies } from 'next/headers'
 import { validateToken } from '@/lib/auth'
@@ -72,6 +74,9 @@ type CreateBriefBody = {
   constraints?: string
   skill_hint?: string
   project_type?: string
+  // Sprint 18E — optional design system slug. If set, hub loads the system
+  // from R2 and passes its DESIGN.md to DESIGNER as upstream context.
+  attached_design_system_slug?: string
 }
 
 export async function POST(req: Request) {
@@ -138,6 +143,7 @@ export async function POST(req: Request) {
       brief_id?: string
       orchestrator_run_id?: string
       subtask_count?: number
+      attached_design_system?: { slug: string; name: string } | null
     }
 
     if (!hubData?.brief_id) {
@@ -177,6 +183,7 @@ export async function POST(req: Request) {
       brief_id: hubData.brief_id,
       orchestrator_run_id: hubData.orchestrator_run_id,
       subtask_count: hubData.subtask_count,
+      attached_design_system: hubData.attached_design_system ?? null,
     })
   } catch (err) {
     console.error('briefs POST service binding error', err)

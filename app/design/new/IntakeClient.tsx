@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, type FormEvent } from "react";
+import { useState, useEffect, type FormEvent } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 
 const SKILLS = [
@@ -13,6 +13,16 @@ const SKILLS = [
 
 type SkillId = (typeof SKILLS)[number]["id"];
 
+// Sprint 18E — attached design system pre-fill
+type AttachedSystem = {
+  slug: string;
+  name: string;
+  description: string | null;
+  primary_color: string | null;
+  category: string | null;
+  tags: string[];
+};
+
 export default function IntakeClient() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -20,6 +30,7 @@ export default function IntakeClient() {
   const projectType = searchParams.get("type") ?? "prototype";
   const initialName = searchParams.get("name") ?? "";
   const fidelity = searchParams.get("fidelity");
+  const systemSlug = searchParams.get("system"); // Sprint 18E
 
   const defaultSkill: SkillId =
     fidelity === "wireframe" ? "wireframe"
@@ -37,8 +48,43 @@ export default function IntakeClient() {
   const [constraints, setConstraints] = useState("");
   const [selectedSkill, setSelectedSkill] = useState<SkillId>(defaultSkill);
 
+  // Sprint 18E — attached design system state
+  const [attachedSystem, setAttachedSystem] = useState<AttachedSystem | null>(null);
+  const [systemLoading, setSystemLoading] = useState(!!systemSlug);
+
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Sprint 18E — when ?system=slug is present, fetch the system metadata
+  // and use it to pre-fill mood_tone + brand_colors as helpful defaults.
+  useEffect(() => {
+    if (!systemSlug) return;
+    fetch(`/api/design/systems/${encodeURIComponent(systemSlug)}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (data && data.slug) {
+          setAttachedSystem({
+            slug: data.slug,
+            name: data.name,
+            description: data.description ?? null,
+            primary_color: data.primary_color ?? null,
+            category: data.category ?? null,
+            tags: Array.isArray(data.tags) ? data.tags : [],
+          });
+          // Pre-fill helpful fields from the system, but only if the user
+          // hasn't typed anything yet. Don't clobber.
+          if (data.tags?.length && !moodTone) {
+            setMoodTone(`Inspired by ${data.name} — ${(data.tags as string[]).slice(0, 3).join(", ")}`);
+          }
+          if (data.primary_color && !brandColors) {
+            setBrandColors(`${data.primary_color} primary (from ${data.name} system)`);
+          }
+        }
+        setSystemLoading(false);
+      })
+      .catch(() => setSystemLoading(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [systemSlug]);
 
   const projectTypeLabel =
     projectType === "slide-deck" ? "slide deck"
@@ -77,14 +123,14 @@ export default function IntakeClient() {
           constraints: constraints.trim() || undefined,
           skill_hint: selectedSkill,
           project_type: projectType,
+          // Sprint 18E — pass attached system to pipeline
+          attached_design_system_slug: attachedSystem?.slug,
         }),
       });
 
       const data = await res.json().catch(() => ({}));
 
       if (!res.ok || !data?.brief_id) {
-        // Surface the actual ll-cockpit error from `detail` first, then upstream_status,
-        // then fall back to our generic error code as last resort.
         const detail =
           data?.detail
           ?? data?.upstream_status
@@ -162,6 +208,77 @@ export default function IntakeClient() {
           padding: "32px 24px 80px",
         }}
       >
+        {/* Sprint 18E — attached design system banner */}
+        {systemSlug && (
+          <div
+            style={{
+              border: `1px solid ${attachedSystem?.primary_color ?? "var(--design-terracotta)"}`,
+              background: "var(--design-terracotta-soft)",
+              borderRadius: 8,
+              padding: "12px 14px",
+              marginBottom: 22,
+              display: "flex",
+              alignItems: "center",
+              gap: 12,
+            }}
+          >
+            <span
+              style={{
+                width: 32,
+                height: 32,
+                borderRadius: 6,
+                background: attachedSystem?.primary_color ?? "var(--design-bg2)",
+                flexShrink: 0,
+                border: "1px solid var(--design-border)",
+              }}
+            />
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 13, fontWeight: 600, color: "var(--design-ink)" }}>
+                {systemLoading
+                  ? "Loading design system…"
+                  : attachedSystem
+                    ? `Using ${attachedSystem.name} design system`
+                    : "Design system not found"}
+              </div>
+              {attachedSystem?.description && (
+                <div
+                  style={{
+                    fontSize: 12,
+                    color: "var(--design-ink3)",
+                    marginTop: 3,
+                    lineHeight: 1.4,
+                    display: "-webkit-box",
+                    WebkitLineClamp: 2,
+                    WebkitBoxOrient: "vertical",
+                    overflow: "hidden",
+                  }}
+                >
+                  {attachedSystem.description}
+                </div>
+              )}
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                setAttachedSystem(null);
+                router.replace("/design/new");
+              }}
+              style={{
+                background: "transparent",
+                border: "1px solid var(--design-border)",
+                color: "var(--design-ink2)",
+                borderRadius: 6,
+                padding: "5px 10px",
+                fontSize: 11,
+                cursor: "pointer",
+              }}
+              title="Remove this design system"
+            >
+              Remove
+            </button>
+          </div>
+        )}
+
         <Section
           label="What kind of design?"
           help="Influences how the agents approach generation."
@@ -220,7 +337,7 @@ export default function IntakeClient() {
         <Section
           label="Mood / tone"
           required
-          help="Adjectives the design should evoke."
+          help={attachedSystem ? "Pre-filled from attached design system. Edit to refine." : "Adjectives the design should evoke."}
         >
           <Input
             value={moodTone}
@@ -257,7 +374,7 @@ export default function IntakeClient() {
 
         <Section
           label="Brand colors"
-          help="Free-form. Hex codes, named colors, or descriptions."
+          help={attachedSystem ? "Pre-filled with primary color from attached system." : "Free-form. Hex codes, named colors, or descriptions."}
         >
           <Input
             value={brandColors}
