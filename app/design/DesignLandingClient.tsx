@@ -15,6 +15,18 @@ type Brief = {
   status?: string;
 };
 
+// Sprint 18E — design system from /api/design/systems
+type DesignSystem = {
+  id: string;
+  slug: string;
+  name: string;
+  description: string | null;
+  category: string | null;
+  primary_color: string | null;
+  tags: string[];
+  source_url: string | null;
+};
+
 function daysAgo(dateVal: string | number): string {
   const ms = typeof dateVal === "number" ? dateVal * 1000 : new Date(dateVal).getTime();
   const diff = Date.now() - ms;
@@ -177,21 +189,8 @@ export default function DesignLandingClient() {
                 setSubTab={setDesignsSubTab}
               />
             )}
-            {rightTab === "Examples" && (
-              <div
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  height: 200,
-                  fontSize: 14,
-                  color: "var(--design-ink3)",
-                }}
-              >
-                Examples coming soon
-              </div>
-            )}
-            {rightTab === "Design systems" && <DesignSystemsTab />}
+            {rightTab === "Examples" && <ExamplesTab router={router} />}
+            {rightTab === "Design systems" && <DesignSystemsTab router={router} />}
           </div>
         </div>
       </div>
@@ -212,7 +211,6 @@ function DesignsTab({
 }) {
   return (
     <div>
-      {/* Sub-tabs + search row */}
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 20 }}>
         {(["Recent", "Your designs"] as const).map((t) => (
           <button
@@ -249,9 +247,7 @@ function DesignsTab({
         />
       </div>
 
-      {/* Card grid */}
       <div style={{ display: "flex", flexWrap: "wrap", gap: 16 }}>
-        {/* Tutorial card */}
         <div
           style={{
             border: "1px solid var(--design-border)",
@@ -279,7 +275,6 @@ function DesignsTab({
           </div>
         </div>
 
-        {/* Loading skeletons */}
         {loading && [1, 2, 3].map((n) => (
           <div
             key={n}
@@ -294,7 +289,6 @@ function DesignsTab({
           />
         ))}
 
-        {/* Brief cards */}
         {!loading && briefs.map((brief) => (
           <a
             key={brief.id}
@@ -310,7 +304,6 @@ function DesignsTab({
               overflow: "hidden",
             }}
           >
-            {/* Card preview area */}
             <div
               style={{
                 height: 80,
@@ -333,7 +326,6 @@ function DesignsTab({
           </a>
         ))}
 
-        {/* Empty state */}
         {!loading && briefs.length === 0 && (
           <div style={{ fontSize: 13, color: "var(--design-ink3)", paddingTop: 8 }}>
             No designs yet. Click + Create to start your first project.
@@ -344,7 +336,190 @@ function DesignsTab({
   );
 }
 
-function DesignSystemsTab() {
+/**
+ * Sprint 18E — Examples tab.
+ * Lists curated design systems from VoltAgent/awesome-design-md import.
+ * Click "Build with this" → /design/new?system={slug} pre-fills the intake form.
+ */
+function ExamplesTab({ router }: { router: ReturnType<typeof useRouter> }) {
+  const [systems, setSystems] = useState<DesignSystem[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [activeCategory, setActiveCategory] = useState<string>("all");
+
+  useEffect(() => {
+    fetch("/api/design/systems")
+      .then((r) => r.json())
+      .then((data) => {
+        setSystems(Array.isArray(data.systems) ? data.systems : []);
+        setLoading(false);
+      })
+      .catch(() => setLoading(false));
+  }, []);
+
+  const categories = Array.from(new Set(systems.map((s) => s.category).filter(Boolean))) as string[];
+  const filtered = activeCategory === "all"
+    ? systems
+    : systems.filter((s) => s.category === activeCategory);
+
+  if (loading) {
+    return (
+      <div style={{ fontSize: 13, color: "var(--design-ink3)", padding: 16 }}>
+        Loading design systems…
+      </div>
+    );
+  }
+
+  if (systems.length === 0) {
+    return (
+      <div style={{ fontSize: 13, color: "var(--design-ink3)", padding: 16 }}>
+        No design systems available yet. The admin needs to run the one-time seed.
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <div style={{ marginBottom: 16 }}>
+        <div style={{ fontSize: 15, fontWeight: 600, color: "var(--design-ink)", marginBottom: 4 }}>
+          Build with a design system
+        </div>
+        <div style={{ fontSize: 13, color: "var(--design-ink3)" }}>
+          {systems.length} curated brand-inspired systems. Click any to start a brief with that aesthetic locked in.
+        </div>
+      </div>
+
+      {/* Category filter pills */}
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 18 }}>
+        <button
+          onClick={() => setActiveCategory("all")}
+          style={{
+            background: activeCategory === "all" ? "var(--design-ink)" : "transparent",
+            color: activeCategory === "all" ? "white" : "var(--design-ink)",
+            border: activeCategory === "all" ? "none" : "1px solid var(--design-border)",
+            borderRadius: 999,
+            padding: "5px 12px",
+            fontSize: 12,
+            cursor: "pointer",
+            fontWeight: activeCategory === "all" ? 500 : 400,
+          }}
+        >
+          All
+        </button>
+        {categories.sort().map((cat) => (
+          <button
+            key={cat}
+            onClick={() => setActiveCategory(cat)}
+            style={{
+              background: activeCategory === cat ? "var(--design-ink)" : "transparent",
+              color: activeCategory === cat ? "white" : "var(--design-ink)",
+              border: activeCategory === cat ? "none" : "1px solid var(--design-border)",
+              borderRadius: 999,
+              padding: "5px 12px",
+              fontSize: 12,
+              cursor: "pointer",
+              fontWeight: activeCategory === cat ? 500 : 400,
+              textTransform: "capitalize",
+            }}
+          >
+            {cat.replace(/-/g, " ")}
+          </button>
+        ))}
+      </div>
+
+      {/* System cards grid */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))", gap: 12 }}>
+        {filtered.map((sys) => (
+          <button
+            key={sys.id}
+            onClick={() => router.push(`/design/new?system=${encodeURIComponent(sys.slug)}`)}
+            style={{
+              border: "1px solid var(--design-border)",
+              borderRadius: 8,
+              padding: 0,
+              textAlign: "left",
+              background: "var(--design-paper)",
+              cursor: "pointer",
+              overflow: "hidden",
+              display: "flex",
+              flexDirection: "column",
+            }}
+          >
+            {/* Color preview band */}
+            <div
+              style={{
+                height: 80,
+                background: sys.primary_color || "var(--design-bg2)",
+                display: "grid",
+                placeItems: "center",
+                color: "white",
+                fontSize: 11,
+                fontFamily: "ui-monospace, SFMono-Regular, monospace",
+                opacity: 0.95,
+              }}
+            >
+              {sys.primary_color || ""}
+            </div>
+            <div style={{ padding: "10px 12px", flex: 1, display: "flex", flexDirection: "column", gap: 6 }}>
+              <div style={{ fontWeight: 600, fontSize: 13, color: "var(--design-ink)" }}>
+                {sys.name}
+              </div>
+              <div
+                style={{
+                  fontSize: 11,
+                  color: "var(--design-ink3)",
+                  lineHeight: 1.4,
+                  display: "-webkit-box",
+                  WebkitLineClamp: 2,
+                  WebkitBoxOrient: "vertical",
+                  overflow: "hidden",
+                }}
+              >
+                {sys.description || ""}
+              </div>
+              {sys.tags.length > 0 && (
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginTop: 4 }}>
+                  {sys.tags.slice(0, 3).map((tag) => (
+                    <span
+                      key={tag}
+                      style={{
+                        fontSize: 10,
+                        padding: "2px 6px",
+                        background: "var(--design-bg2)",
+                        color: "var(--design-ink2)",
+                        borderRadius: 4,
+                      }}
+                    >
+                      {tag}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Sprint 18E — Design Systems tab. Same data source as Examples but
+ * presented as a flat list with creation CTA for user-created systems (future).
+ */
+function DesignSystemsTab({ router }: { router: ReturnType<typeof useRouter> }) {
+  const [systems, setSystems] = useState<DesignSystem[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    fetch("/api/design/systems")
+      .then((r) => r.json())
+      .then((data) => {
+        setSystems(Array.isArray(data.systems) ? data.systems : []);
+        setLoading(false);
+      })
+      .catch(() => setLoading(false));
+  }, []);
+
   return (
     <div>
       <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 16, color: "var(--design-ink)" }}>
@@ -366,40 +541,97 @@ function DesignSystemsTab() {
             Create new design system
           </div>
           <div style={{ color: "var(--design-ink3)", fontSize: 13, marginTop: 2 }}>
-            Teach Claude your brand and product
+            Teach Claude your brand and product (coming soon)
           </div>
         </div>
         <button
+          disabled
           style={{
             border: "1px solid var(--design-border)",
             borderRadius: 6,
             padding: "8px 14px",
             fontSize: 13,
             background: "transparent",
-            cursor: "pointer",
-            color: "var(--design-ink)",
+            cursor: "not-allowed",
+            color: "var(--design-ink3)",
+            opacity: 0.6,
           }}
         >
           Create
         </button>
       </div>
+
       <div style={{ fontSize: 14, fontWeight: 600, color: "var(--design-ink)", marginBottom: 12 }}>
-        Templates
+        Curated library ({systems.length})
       </div>
-      <div
-        style={{
-          border: "1px solid var(--design-border)",
-          borderRadius: 6,
-          padding: 24,
-          textAlign: "center",
-          color: "var(--design-ink3)",
-          fontSize: 13,
-        }}
-      >
-        No templates yet. Create one from any project via the Share menu → File type.
-      </div>
+
+      {loading && (
+        <div style={{ fontSize: 13, color: "var(--design-ink3)" }}>Loading…</div>
+      )}
+
+      {!loading && systems.length === 0 && (
+        <div
+          style={{
+            border: "1px solid var(--design-border)",
+            borderRadius: 6,
+            padding: 24,
+            textAlign: "center",
+            color: "var(--design-ink3)",
+            fontSize: 13,
+          }}
+        >
+          No design systems available yet. The admin needs to run the seed.
+        </div>
+      )}
+
+      {!loading && systems.length > 0 && (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: 8 }}>
+          {systems.map((sys) => (
+            <button
+              key={sys.id}
+              onClick={() => router.push(`/design/new?system=${encodeURIComponent(sys.slug)}`)}
+              style={{
+                border: "1px solid var(--design-border)",
+                borderRadius: 6,
+                padding: "10px 12px",
+                background: "var(--design-paper)",
+                cursor: "pointer",
+                textAlign: "left",
+                display: "flex",
+                alignItems: "center",
+                gap: 10,
+              }}
+            >
+              <span
+                style={{
+                  width: 24,
+                  height: 24,
+                  borderRadius: 4,
+                  background: sys.primary_color || "var(--design-bg2)",
+                  flexShrink: 0,
+                  border: "1px solid var(--design-border)",
+                }}
+              />
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 13, fontWeight: 500, color: "var(--design-ink)" }}>
+                  {sys.name}
+                </div>
+                <div
+                  style={{
+                    fontSize: 11,
+                    color: "var(--design-ink3)",
+                    textTransform: "capitalize",
+                  }}
+                >
+                  {sys.category?.replace(/-/g, " ") || "other"}
+                </div>
+              </div>
+            </button>
+          ))}
+        </div>
+      )}
       <div style={{ fontSize: 12, color: "var(--design-ink3)", marginTop: 12 }}>
-        Only you can view these settings.
+        Library is shared across all users. User-created systems (coming soon) are private to you.
       </div>
     </div>
   );
