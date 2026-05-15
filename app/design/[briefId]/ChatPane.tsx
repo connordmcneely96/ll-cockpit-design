@@ -17,6 +17,21 @@ type Message = {
   content: string;
   agent?: string;
   created_at: number;
+  // Sprint 16 v0.3 — agent execution metadata for the disclosure footer
+  tool_hops?: number;
+  cost_usd?: number;
+  latency_ms?: number;
+};
+
+// Sprint 16 v0.3 — shape of GET /api/design/briefs/[id]/chat rows from the hub
+type HubChatMessageRow = {
+  id: string;
+  role: "user" | "assistant" | "tool_result";
+  content: string | null;
+  tool_calls_json: string | null;
+  model_id: string | null;
+  cost_usd: number;
+  created_at: number;
 };
 
 type Props = {
@@ -30,9 +45,19 @@ type Props = {
     subtasks_done: number;
   } | null;
   token: string;
+  // Sprint 16 v0.3 — parent fires this after a successful chat reply so the
+  // preview iframe + file tree refetch from R2.
+  onChatReply?: () => void;
 };
 
-export default function ChatPane({ briefId, brief, subtasks, run, token }: Props) {
+export default function ChatPane({
+  briefId,
+  brief,
+  subtasks,
+  run,
+  token: _token,
+  onChatReply,
+}: Props) {
   const [messages, setMessages] = useState<Message[]>(() => buildInitialMessages(brief));
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
@@ -40,11 +65,57 @@ export default function ChatPane({ briefId, brief, subtasks, run, token }: Props
   const [agentOpen, setAgentOpen] = useState(brief.status === "building");
   const [activeSkill, setActiveSkill] = useState<string | null>(null);
   const [expandedSubtask, setExpandedSubtask] = useState<string | null>(null);
+  const [historyLoaded, setHistoryLoaded] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (brief.status === "building") setAgentOpen(true);
   }, [brief.status]);
+
+  // Sprint 16 v0.3 — hydrate prior chat turns once on mount so users return
+  // to their conversation instead of starting fresh every page load.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(`/api/design/briefs/${briefId}/chat`, {
+          method: "GET",
+        });
+        if (!res.ok) {
+          // 401 here means session expired; the surface auth banner already
+          // handles re-auth. We just skip history hydration.
+          setHistoryLoaded(true);
+          return;
+        }
+        const data = (await res.json()) as { messages?: HubChatMessageRow[] };
+        if (cancelled) return;
+
+        const prior = (data.messages ?? [])
+          .filter((m) => m.role === "user" || m.role === "assistant")
+          .filter((m) => m.content && m.content.trim().length > 0)
+          .map<Message>((m) => ({
+            id: m.id,
+            role: m.role === "user" ? "user" : "agent",
+            content: m.content ?? "",
+            agent: m.role === "assistant" ? "DESIGNER" : undefined,
+            created_at: m.created_at * 1000,
+            cost_usd: m.cost_usd,
+          }));
+
+        if (prior.length > 0) {
+          // Replace the welcome message with real history
+          setMessages(prior);
+        }
+        setHistoryLoaded(true);
+      } catch (err) {
+        console.error("chat history load failed", err);
+        setHistoryLoaded(true);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [briefId]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -69,47 +140,67 @@ export default function ChatPane({ briefId, brief, subtasks, run, token }: Props
     setMessages((prev) => [...prev, userMsg]);
 
     try {
-      const res = await fetch(
-        `https://ll-cockpit.connorpattern.workers.dev/api/design/briefs/${briefId}/chat`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Cookie: `sb-access-token=${token}`,
-          },
-          body: JSON.stringify({ message: text, skill: activeSkill }),
-        }
-      );
+      // Sprint 16 v0.3 — call LOCAL proxy (Sprint 20 ADR fix).
+      // Was: fetch("https://ll-cockpit.connorpattern.workers.dev/...",
+      //              { headers: { Cookie: `sb-access-token=...` } })
+      // That doesn't work — browsers refuse to set Cookie headers manually,
+      // and cross-origin would be blocked anyway. The local proxy uses the
+      // design Worker's own cookie auth + env.HUB service binding.
+      const res = await fetch(`/api/design/briefs/${briefId}/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message: text, skill: activeSkill }),
+      });
 
       if (res.ok) {
         const data = await res.json();
+        const replyText =
+          data.final_text ||
+          data.reply ||
+          data.message ||
+          "Got it — I made the change but didn't have anything to add.";
+
         const agentMsg: Message = {
           id: crypto.randomUUID(),
           role: "agent",
-          agent: data.agent ?? "NEXUS",
-          content: data.reply ?? data.message ?? "Got it. Working on your update.",
+          agent: data.agent ?? "DESIGNER",
+          content: replyText,
           created_at: Date.now(),
+          tool_hops: data.tool_hops,
+          cost_usd: data.cost_usd,
+          latency_ms: data.latency_ms,
         };
         setMessages((prev) => [...prev, agentMsg]);
+
+        // Sprint 16 v0.3 — let the parent refetch preview + files. Tools like
+        // update_design_tokens and regenerate_section re-upload to R2; the
+        // viewer needs to refresh to see the change.
+        if (onChatReply && (data.tool_hops ?? 0) > 0) {
+          onChatReply();
+        }
       } else {
+        const errBody = await res.json().catch(() => ({}));
         setMessages((prev) => [
           ...prev,
           {
             id: crypto.randomUUID(),
             role: "agent",
-            agent: "NEXUS",
-            content: "Something went wrong. Try again in a moment.",
+            agent: "DESIGNER",
+            content: `Something went wrong (${res.status}). ${
+              errBody.error ?? "Try again in a moment."
+            }`,
             created_at: Date.now(),
           },
         ]);
       }
-    } catch {
+    } catch (err) {
+      console.error("chat send error", err);
       setMessages((prev) => [
         ...prev,
         {
           id: crypto.randomUUID(),
           role: "agent",
-          agent: "NEXUS",
+          agent: "DESIGNER",
           content: "Unable to reach the agent. Check your connection.",
           created_at: Date.now(),
         },
@@ -126,10 +217,9 @@ export default function ChatPane({ briefId, brief, subtasks, run, token }: Props
         flexDirection: "column",
         height: "100%",
         overflow: "hidden",
-        minWidth: 0, // critical for flex children — prevents content from forcing width
+        minWidth: 0,
       }}
     >
-      {/* Agent execution disclosure header — always visible compact strip */}
       <div
         style={{
           borderBottom: "1px solid var(--design-border)",
@@ -192,11 +282,10 @@ export default function ChatPane({ briefId, brief, subtasks, run, token }: Props
         </button>
       </div>
 
-      {/* Agent disclosure body — collapsible, scrollable, fixed max-height */}
       {agentOpen && (
         <div
           style={{
-            maxHeight: 220, // tighter — leaves more room for chat
+            maxHeight: 220,
             overflowY: "auto",
             background: "var(--design-bg)",
             borderBottom: "1px solid var(--design-border)",
@@ -236,11 +325,10 @@ export default function ChatPane({ briefId, brief, subtasks, run, token }: Props
         </div>
       )}
 
-      {/* Message list — takes remaining vertical space */}
       <div
         style={{
           flex: 1,
-          minHeight: 0, // critical for flex children
+          minHeight: 0,
           overflowY: "auto",
           padding: "16px 14px 0",
           display: "flex",
@@ -248,13 +336,64 @@ export default function ChatPane({ briefId, brief, subtasks, run, token }: Props
           gap: 14,
         }}
       >
+        {!historyLoaded && (
+          <div
+            style={{
+              fontSize: 11,
+              color: "var(--design-ink3)",
+              fontStyle: "italic",
+              textAlign: "center",
+            }}
+          >
+            Loading conversation…
+          </div>
+        )}
         {messages.map((msg) => (
           <MessageBubble key={msg.id} msg={msg} />
         ))}
+        {sending && (
+          <div
+            style={{
+              display: "flex",
+              gap: 8,
+              alignItems: "flex-start",
+            }}
+          >
+            <div
+              style={{
+                width: 26,
+                height: 26,
+                borderRadius: "50%",
+                background: "var(--design-terracotta-soft)",
+                border: "1px solid var(--design-terracotta)",
+                display: "grid",
+                placeItems: "center",
+                fontSize: 10,
+                color: "var(--design-terracotta)",
+                fontWeight: 700,
+                flexShrink: 0,
+                marginTop: 2,
+              }}
+            >
+              D
+            </div>
+            <div
+              style={{
+                background: "var(--design-bg2)",
+                borderRadius: "12px 12px 12px 2px",
+                padding: "10px 13px",
+                fontSize: 13,
+                color: "var(--design-ink3)",
+                fontStyle: "italic",
+              }}
+            >
+              Thinking and working…
+            </div>
+          </div>
+        )}
         <div ref={bottomRef} />
       </div>
 
-      {/* Skills chips */}
       <div
         style={{
           padding: "10px 14px 6px",
@@ -289,7 +428,6 @@ export default function ChatPane({ briefId, brief, subtasks, run, token }: Props
         ))}
       </div>
 
-      {/* Input row */}
       <div
         style={{
           padding: "8px 14px 14px",
@@ -309,7 +447,12 @@ export default function ChatPane({ briefId, brief, subtasks, run, token }: Props
               handleSend();
             }
           }}
-          placeholder="Ask for changes, describe what you need…"
+          placeholder={
+            brief.status === "building"
+              ? "Wait for the build to finish, then chat to refine…"
+              : "Ask for changes — try 'make the hero darker' or 'rewrite the pricing section'"
+          }
+          disabled={brief.status === "building"}
           rows={2}
           style={{
             flex: 1,
@@ -324,14 +467,15 @@ export default function ChatPane({ briefId, brief, subtasks, run, token }: Props
             outline: "none",
             fontFamily: "inherit",
             lineHeight: 1.5,
+            opacity: brief.status === "building" ? 0.5 : 1,
           }}
         />
         <button
           onClick={handleSend}
-          disabled={!input.trim() || sending}
+          disabled={!input.trim() || sending || brief.status === "building"}
           style={{
             background:
-              input.trim() && !sending
+              input.trim() && !sending && brief.status !== "building"
                 ? "var(--design-terracotta)"
                 : "var(--design-terracotta-disabled)",
             color: "white",
@@ -340,7 +484,10 @@ export default function ChatPane({ briefId, brief, subtasks, run, token }: Props
             padding: "10px 14px",
             fontSize: 13,
             fontWeight: 500,
-            cursor: input.trim() && !sending ? "pointer" : "not-allowed",
+            cursor:
+              input.trim() && !sending && brief.status !== "building"
+                ? "pointer"
+                : "not-allowed",
             flexShrink: 0,
             transition: "background 0.15s ease",
           }}
@@ -380,7 +527,7 @@ function AgentRow({
           ? "var(--design-paper)"
           : "var(--design-bg2)",
         overflow: "hidden",
-        minWidth: 0, // prevent forcing parent width
+        minWidth: 0,
       }}
     >
       <button
@@ -391,7 +538,7 @@ function AgentRow({
           background: "none",
           border: "none",
           padding: "8px 10px",
-          minHeight: 36, // FIXED row height prevents collapse
+          minHeight: 36,
           display: "flex",
           alignItems: "center",
           gap: 9,
@@ -604,31 +751,62 @@ function MessageBubble({ msg }: { msg: Message }) {
       <div
         style={{
           maxWidth: "78%",
-          background: isUser ? "var(--design-terracotta)" : "var(--design-bg2)",
-          color: isUser ? "white" : "var(--design-ink)",
-          borderRadius: isUser ? "12px 12px 2px 12px" : "12px 12px 12px 2px",
-          padding: "10px 13px",
-          fontSize: 13,
-          lineHeight: 1.55,
-          whiteSpace: "pre-wrap",
-          wordBreak: "break-word",
+          display: "flex",
+          flexDirection: "column",
+          gap: 4,
         }}
       >
-        {!isUser && msg.agent && (
+        <div
+          style={{
+            background: isUser ? "var(--design-terracotta)" : "var(--design-bg2)",
+            color: isUser ? "white" : "var(--design-ink)",
+            borderRadius: isUser ? "12px 12px 2px 12px" : "12px 12px 12px 2px",
+            padding: "10px 13px",
+            fontSize: 13,
+            lineHeight: 1.55,
+            whiteSpace: "pre-wrap",
+            wordBreak: "break-word",
+          }}
+        >
+          {!isUser && msg.agent && (
+            <div
+              style={{
+                fontSize: 10,
+                fontWeight: 600,
+                color: "var(--design-terracotta)",
+                marginBottom: 4,
+                textTransform: "uppercase",
+                letterSpacing: "0.05em",
+              }}
+            >
+              {msg.agent}
+            </div>
+          )}
+          {msg.content}
+        </div>
+        {/* Sprint 16 v0.3 — agent metadata footer (only when present) */}
+        {!isUser && (msg.tool_hops || msg.cost_usd || msg.latency_ms) && (
           <div
             style={{
               fontSize: 10,
-              fontWeight: 600,
-              color: "var(--design-terracotta)",
-              marginBottom: 4,
-              textTransform: "uppercase",
-              letterSpacing: "0.05em",
+              color: "var(--design-ink3)",
+              fontFamily: "ui-monospace, 'JetBrains Mono', Menlo, monospace",
+              display: "flex",
+              gap: 10,
+              flexWrap: "wrap",
             }}
           >
-            {msg.agent}
+            {msg.tool_hops !== undefined && msg.tool_hops > 0 && (
+              <span>{msg.tool_hops} tool {msg.tool_hops === 1 ? "call" : "calls"}</span>
+            )}
+            {msg.cost_usd !== undefined && msg.cost_usd > 0 && (
+              <span>${msg.cost_usd.toFixed(4)}</span>
+            )}
+            {msg.latency_ms !== undefined && msg.latency_ms > 0 && (
+              <span>{(msg.latency_ms / 1000).toFixed(1)}s</span>
+            )}
           </div>
         )}
-        {msg.content}
       </div>
     </div>
   );
@@ -639,13 +817,13 @@ function buildInitialMessages(brief: Brief): Message[] {
     {
       id: "welcome",
       role: "agent",
-      agent: "NEXUS",
+      agent: "DESIGNER",
       content:
         brief.status === "done"
-          ? `Your design for ${brief.client_name ?? "this project"} is ready. Ask me to make changes, regenerate sections, or adjust the style.`
+          ? `Your design for ${brief.client_name ?? "this project"} is ready. Ask me to make changes — try "make the hero darker", "rewrite the pricing section as enterprise-focused", or "change the primary color to a warmer purple".`
           : brief.status === "error"
-          ? `Something went wrong building ${brief.client_name ?? "this design"}. Describe what you'd like and I'll try again.`
-          : `Building your design for ${brief.client_name ?? "this project"}… I'll update you as each section completes.`,
+          ? `Something went wrong building ${brief.client_name ?? "this design"}. The build will resume automatically.`
+          : `Building your design for ${brief.client_name ?? "this project"}… You can chat to refine once the build completes.`,
       created_at: brief.created_at * 1000,
     },
   ];
