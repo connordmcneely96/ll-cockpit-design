@@ -8,11 +8,21 @@ type Props = {
   files: DesignFile[];
   selectedFile: string | null;
   briefStatus: "building" | "done" | "error";
+  // Sprint 16 v0.3 — bump this when the iteration agent re-uploads R2
+  // (update_design_tokens, regenerate_section, save_iteration) so the
+  // preview iframe cache-busts and reloads.
+  refreshKey?: number;
 };
 
 type ViewMode = "code" | "preview";
 
-export default function CodeViewer({ briefId, files, selectedFile, briefStatus }: Props) {
+export default function CodeViewer({
+  briefId,
+  files,
+  selectedFile,
+  briefStatus,
+  refreshKey = 0,
+}: Props) {
   const [viewMode, setViewMode] = useState<ViewMode>("code");
 
   const file = files.find((f) => f.path === selectedFile) ?? null;
@@ -78,7 +88,11 @@ export default function CodeViewer({ briefId, files, selectedFile, briefStatus }
         {viewMode === "code" ? (
           <CodeBlock content={activeFile.content} />
         ) : (
-          <PreviewFrame briefId={briefId} hasHtml={htmlFile !== null} />
+          <PreviewFrame
+            briefId={briefId}
+            hasHtml={htmlFile !== null}
+            refreshKey={refreshKey}
+          />
         )}
       </div>
     </div>
@@ -146,7 +160,15 @@ function CodeBlock({ content }: { content: string }) {
   );
 }
 
-function PreviewFrame({ briefId, hasHtml }: { briefId: string; hasHtml: boolean }) {
+function PreviewFrame({
+  briefId,
+  hasHtml,
+  refreshKey,
+}: {
+  briefId: string;
+  hasHtml: boolean;
+  refreshKey: number;
+}) {
   if (!hasHtml) {
     return (
       <div
@@ -167,9 +189,12 @@ function PreviewFrame({ briefId, hasHtml }: { briefId: string; hasHtml: boolean 
     );
   }
 
+  // Sprint 16 v0.3 — cache-bust on refreshKey + key prop forces full iframe
+  // remount, the only reliable way to force the browser to refetch.
   return (
     <iframe
-      src={`/design/preview/${briefId}`}
+      key={`preview-${refreshKey}`}
+      src={`/design/preview/${briefId}?v=${refreshKey}`}
       style={{
         width: "100%",
         height: "100%",
