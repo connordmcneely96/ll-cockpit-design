@@ -15,11 +15,8 @@ type Props = {
 };
 
 // Sprint 18G — auto-resume thresholds
-// If the pipeline has ≥1 failed subtask AND the brief is still 'building'
-// for ≥AUTO_RESUME_AFTER_MS, fire POST /resume once. Track via ref so we
-// don't spam resumes if Anthropic keeps rate-limiting.
-const AUTO_RESUME_AFTER_MS = 60_000; // 1 minute of stuck-with-failures state
-const MAX_AUTO_RESUMES = 3; // hard ceiling; user can manually retry beyond this
+const AUTO_RESUME_AFTER_MS = 60_000;
+const MAX_AUTO_RESUMES = 3;
 
 export default function CanvasClient({ briefId, detail: initialDetail, token }: Props) {
   const router = useRouter();
@@ -44,7 +41,26 @@ export default function CanvasClient({ briefId, detail: initialDetail, token }: 
   const { brief, subtasks, run } = detail;
   const displayName = brief.client_name || "Untitled design";
 
-  // Sprint 18G — auto-trigger resume when pipeline is stuck with failures
+  // Sprint 16 v0.3 — refresh files + preview after a chat-driven tool call.
+  // The iteration agent's update_design_tokens / regenerate_section tools
+  // re-upload to R2; the viewer needs to refetch to see the change.
+  async function handleChatReply() {
+    // Refetch brief detail so iteration_number, status, current_iteration
+    // are up to date (save_iteration tool bumps these).
+    try {
+      const res = await fetch(`/api/design/briefs/${briefId}/detail`);
+      if (res.ok) {
+        const data: BriefDetail = await res.json();
+        setDetail(data);
+      }
+    } catch (err) {
+      console.error("detail refresh after chat failed", err);
+    }
+    // Bump files refresh key — FileTree re-fetches, CodeViewer iframe
+    // cache-busts on this key change.
+    setFilesRefreshKey((k) => k + 1);
+  }
+
   async function maybeAutoResume(currentSubtasks: Subtask[]) {
     if (resumeInflightRef.current) return;
     if (resumeCountRef.current >= MAX_AUTO_RESUMES) return;
@@ -54,14 +70,12 @@ export default function CanvasClient({ briefId, detail: initialDetail, token }: 
     ).length;
 
     if (failedCount === 0) {
-      // No failures — clear the watchdog timer
       lastFailedSeenAtRef.current = null;
       return;
     }
 
     const now = Date.now();
     if (lastFailedSeenAtRef.current === null) {
-      // First time we've seen failures — start the timer
       lastFailedSeenAtRef.current = now;
       return;
     }
@@ -69,7 +83,6 @@ export default function CanvasClient({ briefId, detail: initialDetail, token }: 
     const elapsed = now - lastFailedSeenAtRef.current;
     if (elapsed < AUTO_RESUME_AFTER_MS) return;
 
-    // Threshold crossed — fire resume
     resumeInflightRef.current = true;
     resumeCountRef.current += 1;
     setResumeBanner({
@@ -83,13 +96,8 @@ export default function CanvasClient({ briefId, detail: initialDetail, token }: 
         headers: { "Content-Type": "application/json" },
       });
       if (res.ok) {
-        setResumeBanner({
-          state: "ok",
-          message: `Retry sent. Pipeline resuming…`,
-        });
-        // Reset watchdog so next failure cycle gets fresh timer
+        setResumeBanner({ state: "ok", message: `Retry sent. Pipeline resuming…` });
         lastFailedSeenAtRef.current = null;
-        // Banner auto-clears after 4s
         setTimeout(() => setResumeBanner(null), 4000);
       } else {
         const body = await res.text();
@@ -98,7 +106,6 @@ export default function CanvasClient({ briefId, detail: initialDetail, token }: 
           state: "failed",
           message: `Retry failed (${res.status}). Will try again shortly.`,
         });
-        // Allow retry on next cycle
         lastFailedSeenAtRef.current = Date.now();
       }
     } catch (err) {
@@ -139,7 +146,6 @@ export default function CanvasClient({ briefId, detail: initialDetail, token }: 
           setFilesRefreshKey((k) => k + 1);
         }
 
-        // Sprint 18G — check if pipeline needs auto-resume
         await maybeAutoResume(data.subtasks);
       } catch (err) {
         if ((err as Error).name === "AbortError") return;
@@ -265,7 +271,6 @@ export default function CanvasClient({ briefId, detail: initialDetail, token }: 
         </div>
       )}
 
-      {/* Sprint 18G — auto-resume banner */}
       {resumeBanner && (
         <div
           style={{
@@ -332,6 +337,7 @@ export default function CanvasClient({ briefId, detail: initialDetail, token }: 
             subtasks={subtasks}
             run={run ?? null}
             token={token}
+            onChatReply={handleChatReply}
           />
         </div>
 
@@ -361,6 +367,7 @@ export default function CanvasClient({ briefId, detail: initialDetail, token }: 
               files={files}
               selectedFile={selectedFile}
               briefStatus={brief.status}
+              refreshKey={filesRefreshKey}
             />
           </div>
         </div>
