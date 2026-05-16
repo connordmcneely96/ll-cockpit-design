@@ -11,25 +11,55 @@ const SKILLS = [
   { id: "frontend_design", label: "Frontend design" },
 ] as const;
 
+// ──────────────────────────────────────────────────────────────────────
+// Sprint 16 v0.4 — tool transparency types
+// ──────────────────────────────────────────────────────────────────────
+
+type ToolActivity = {
+  toolUseId: string;
+  toolName: string;
+  toolInput: Record<string, unknown>;
+  toolResult?: {
+    rawContent: string;
+    parsed?: unknown; // attempted JSON.parse of rawContent (success or null)
+    isError: boolean;
+  };
+};
+
 type Message = {
   id: string;
-  role: "user" | "agent";
-  content: string;
+  role: "user" | "agent" | "tool";
+  content?: string;
+  toolActivities?: ToolActivity[];
   agent?: string;
   created_at: number;
-  // Sprint 16 v0.3 — agent execution metadata for the disclosure footer
   tool_hops?: number;
   cost_usd?: number;
   latency_ms?: number;
 };
 
-// Sprint 16 v0.3 — shape of GET /api/design/briefs/[id]/chat rows from the hub
+// Shape of design_chat_messages rows from GET /api/design/briefs/[id]/chat
+// (includes tool_results_json as of Sprint 16 v0.4)
 type HubChatMessageRow = {
   id: string;
   role: "user" | "assistant" | "tool_result";
   content: string | null;
   tool_calls_json: string | null;
+  tool_results_json: string | null;
   model_id: string | null;
+  cost_usd: number;
+  created_at: number;
+};
+
+// Shape of `turn_messages` returned from POST /api/design/briefs/[id]/chat
+// (Sprint 16 v0.4) — same shape as HubChatMessageRow, just role-narrowed
+// (no user rows in turn_messages — they're excluded by the hub).
+type HubTurnMessageRow = {
+  id: string;
+  role: "assistant" | "tool_result";
+  content: string | null;
+  tool_calls_json: string | null;
+  tool_results_json: string | null;
   cost_usd: number;
   created_at: number;
 };
@@ -45,8 +75,6 @@ type Props = {
     subtasks_done: number;
   } | null;
   token: string;
-  // Sprint 16 v0.3 — parent fires this after a successful chat reply so the
-  // preview iframe + file tree refetch from R2.
   onChatReply?: () => void;
 };
 
@@ -61,7 +89,6 @@ export default function ChatPane({
   const [messages, setMessages] = useState<Message[]>(() => buildInitialMessages(brief));
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
-  // Auto-expand the disclosure while building; collapsed by default once done.
   const [agentOpen, setAgentOpen] = useState(brief.status === "building");
   const [activeSkill, setActiveSkill] = useState<string | null>(null);
   const [expandedSubtask, setExpandedSubtask] = useState<string | null>(null);
@@ -72,8 +99,7 @@ export default function ChatPane({
     if (brief.status === "building") setAgentOpen(true);
   }, [brief.status]);
 
-  // Sprint 16 v0.3 — hydrate prior chat turns once on mount so users return
-  // to their conversation instead of starting fresh every page load.
+  // Hydrate prior chat turns on mount, including tool activity
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -82,29 +108,15 @@ export default function ChatPane({
           method: "GET",
         });
         if (!res.ok) {
-          // 401 here means session expired; the surface auth banner already
-          // handles re-auth. We just skip history hydration.
           setHistoryLoaded(true);
           return;
         }
         const data = (await res.json()) as { messages?: HubChatMessageRow[] };
         if (cancelled) return;
 
-        const prior = (data.messages ?? [])
-          .filter((m) => m.role === "user" || m.role === "assistant")
-          .filter((m) => m.content && m.content.trim().length > 0)
-          .map<Message>((m) => ({
-            id: m.id,
-            role: m.role === "user" ? "user" : "agent",
-            content: m.content ?? "",
-            agent: m.role === "assistant" ? "DESIGNER" : undefined,
-            created_at: m.created_at * 1000,
-            cost_usd: m.cost_usd,
-          }));
-
-        if (prior.length > 0) {
-          // Replace the welcome message with real history
-          setMessages(prior);
+        const built = buildMessagesFromHistory(data.messages ?? []);
+        if (built.length > 0) {
+          setMessages(built);
         }
         setHistoryLoaded(true);
       } catch (err) {
@@ -140,12 +152,6 @@ export default function ChatPane({
     setMessages((prev) => [...prev, userMsg]);
 
     try {
-      // Sprint 16 v0.3 — call LOCAL proxy (Sprint 20 ADR fix).
-      // Was: fetch("https://ll-cockpit.connorpattern.workers.dev/...",
-      //              { headers: { Cookie: `sb-access-token=...` } })
-      // That doesn't work — browsers refuse to set Cookie headers manually,
-      // and cross-origin would be blocked anyway. The local proxy uses the
-      // design Worker's own cookie auth + env.HUB service binding.
       const res = await fetch(`/api/design/briefs/${briefId}/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -153,28 +159,51 @@ export default function ChatPane({
       });
 
       if (res.ok) {
-        const data = await res.json();
-        const replyText =
-          data.final_text ||
-          data.reply ||
-          data.message ||
-          "Got it — I made the change but didn't have anything to add.";
-
-        const agentMsg: Message = {
-          id: crypto.randomUUID(),
-          role: "agent",
-          agent: data.agent ?? "DESIGNER",
-          content: replyText,
-          created_at: Date.now(),
-          tool_hops: data.tool_hops,
-          cost_usd: data.cost_usd,
-          latency_ms: data.latency_ms,
+        const data = (await res.json()) as {
+          final_text?: string;
+          reply?: string;
+          message?: string;
+          agent?: string;
+          tool_hops?: number;
+          cost_usd?: number;
+          latency_ms?: number;
+          turn_messages?: HubTurnMessageRow[];
         };
-        setMessages((prev) => [...prev, agentMsg]);
 
-        // Sprint 16 v0.3 — let the parent refetch preview + files. Tools like
-        // update_design_tokens and regenerate_section re-upload to R2; the
-        // viewer needs to refresh to see the change.
+        // v0.4 — render tool activity + final reply from turn_messages.
+        // Falls back to the legacy single-reply path if turn_messages is
+        // absent (e.g. hub on older code).
+        const turnsAsMessages = data.turn_messages
+          ? buildMessagesFromTurns(data.turn_messages, {
+              agentName: data.agent ?? "DESIGNER",
+              tool_hops: data.tool_hops,
+              cost_usd: data.cost_usd,
+              latency_ms: data.latency_ms,
+            })
+          : [];
+
+        if (turnsAsMessages.length > 0) {
+          setMessages((prev) => [...prev, ...turnsAsMessages]);
+        } else {
+          // Legacy fallback: single agent bubble with the reply text.
+          const replyText =
+            data.final_text ||
+            data.reply ||
+            data.message ||
+            "Got it — I made the change but didn't have anything to add.";
+          const agentMsg: Message = {
+            id: crypto.randomUUID(),
+            role: "agent",
+            agent: data.agent ?? "DESIGNER",
+            content: replyText,
+            created_at: Date.now(),
+            tool_hops: data.tool_hops,
+            cost_usd: data.cost_usd,
+            latency_ms: data.latency_ms,
+          };
+          setMessages((prev) => [...prev, agentMsg]);
+        }
+
         if (onChatReply && (data.tool_hops ?? 0) > 0) {
           onChatReply();
         }
@@ -348,9 +377,10 @@ export default function ChatPane({
             Loading conversation…
           </div>
         )}
-        {messages.map((msg) => (
-          <MessageBubble key={msg.id} msg={msg} />
-        ))}
+        {messages.map((msg) => {
+          if (msg.role === "tool") return <ToolBatch key={msg.id} msg={msg} />;
+          return <MessageBubble key={msg.id} msg={msg} />;
+        })}
         {sending && (
           <div
             style={{
@@ -498,6 +528,202 @@ export default function ChatPane({
     </div>
   );
 }
+
+// ──────────────────────────────────────────────────────────────────────
+// Sprint 16 v0.4 — turn parsing helpers
+// ──────────────────────────────────────────────────────────────────────
+
+function buildMessagesFromHistory(rows: HubChatMessageRow[]): Message[] {
+  const result: Message[] = [];
+  // Map tool_use_id → ToolActivity reference so tool_result rows can mutate
+  // the corresponding tool activity. The references live inside `result`'s
+  // message.toolActivities array, so mutation propagates without re-keying.
+  const toolMap = new Map<string, ToolActivity>();
+
+  for (const row of rows) {
+    if (row.role === "user") {
+      if (!row.content || !row.content.trim()) continue;
+      result.push({
+        id: row.id,
+        role: "user",
+        content: row.content,
+        created_at: row.created_at * 1000,
+      });
+      continue;
+    }
+    if (row.role === "assistant") {
+      // Tool calls first (they happen before the assistant's text reply)
+      if (row.tool_calls_json) {
+        const calls = safeParseToolCalls(row.tool_calls_json);
+        if (calls.length > 0) {
+          const activities: ToolActivity[] = calls.map((c) => ({
+            toolUseId: c.id,
+            toolName: c.name,
+            toolInput: c.input,
+          }));
+          for (const a of activities) toolMap.set(a.toolUseId, a);
+          result.push({
+            id: row.id + "_tools",
+            role: "tool",
+            toolActivities: activities,
+            created_at: row.created_at * 1000,
+          });
+        }
+      }
+      // Then the assistant's text content (if any)
+      if (row.content && row.content.trim()) {
+        result.push({
+          id: row.id,
+          role: "agent",
+          agent: "DESIGNER",
+          content: row.content,
+          created_at: row.created_at * 1000,
+          cost_usd: row.cost_usd,
+        });
+      }
+      continue;
+    }
+    if (row.role === "tool_result" && row.tool_results_json) {
+      const results = safeParseToolResults(row.tool_results_json);
+      for (const r of results) {
+        const ta = toolMap.get(r.tool_use_id);
+        if (ta) {
+          ta.toolResult = {
+            rawContent: r.content,
+            parsed: safeJsonParse(r.content),
+            isError: !!r.is_error,
+          };
+        }
+      }
+    }
+  }
+
+  return result;
+}
+
+function buildMessagesFromTurns(
+  turns: HubTurnMessageRow[],
+  meta: {
+    agentName: string;
+    tool_hops?: number;
+    cost_usd?: number;
+    latency_ms?: number;
+  },
+): Message[] {
+  const result: Message[] = [];
+  const toolMap = new Map<string, ToolActivity>();
+
+  for (const row of turns) {
+    if (row.role === "assistant") {
+      if (row.tool_calls_json) {
+        const calls = safeParseToolCalls(row.tool_calls_json);
+        if (calls.length > 0) {
+          const activities: ToolActivity[] = calls.map((c) => ({
+            toolUseId: c.id,
+            toolName: c.name,
+            toolInput: c.input,
+          }));
+          for (const a of activities) toolMap.set(a.toolUseId, a);
+          result.push({
+            id: row.id + "_tools",
+            role: "tool",
+            toolActivities: activities,
+            created_at: row.created_at * 1000,
+          });
+        }
+      }
+      if (row.content && row.content.trim()) {
+        result.push({
+          id: row.id,
+          role: "agent",
+          agent: meta.agentName,
+          content: row.content,
+          created_at: row.created_at * 1000,
+          cost_usd: row.cost_usd,
+        });
+      }
+      continue;
+    }
+    if (row.role === "tool_result" && row.tool_results_json) {
+      const results = safeParseToolResults(row.tool_results_json);
+      for (const r of results) {
+        const ta = toolMap.get(r.tool_use_id);
+        if (ta) {
+          ta.toolResult = {
+            rawContent: r.content,
+            parsed: safeJsonParse(r.content),
+            isError: !!r.is_error,
+          };
+        }
+      }
+    }
+  }
+
+  // Attach overall meta (cost, hops, latency) to the LAST agent message
+  // so the footer in MessageBubble renders the same way as before.
+  const lastAgentIdx = (() => {
+    for (let i = result.length - 1; i >= 0; i--) if (result[i].role === "agent") return i;
+    return -1;
+  })();
+  if (lastAgentIdx >= 0) {
+    result[lastAgentIdx] = {
+      ...result[lastAgentIdx],
+      tool_hops: meta.tool_hops,
+      cost_usd: meta.cost_usd ?? result[lastAgentIdx].cost_usd,
+      latency_ms: meta.latency_ms,
+    };
+  }
+
+  return result;
+}
+
+function safeParseToolCalls(json: string): Array<{
+  id: string;
+  name: string;
+  input: Record<string, unknown>;
+}> {
+  try {
+    const parsed = JSON.parse(json);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter(
+        (x): x is { id: string; name: string; input: Record<string, unknown> } =>
+          x && typeof x === "object" && typeof x.id === "string" && typeof x.name === "string",
+      )
+      .map((x) => ({ id: x.id, name: x.name, input: x.input ?? {} }));
+  } catch {
+    return [];
+  }
+}
+
+function safeParseToolResults(json: string): Array<{
+  tool_use_id: string;
+  content: string;
+  is_error?: boolean;
+}> {
+  try {
+    const parsed = JSON.parse(json);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(
+      (x): x is { tool_use_id: string; content: string; is_error?: boolean } =>
+        x && typeof x === "object" && typeof x.tool_use_id === "string",
+    );
+  } catch {
+    return [];
+  }
+}
+
+function safeJsonParse(raw: string): unknown {
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Components
+// ──────────────────────────────────────────────────────────────────────
 
 function AgentRow({
   subtask,
@@ -784,7 +1010,6 @@ function MessageBubble({ msg }: { msg: Message }) {
           )}
           {msg.content}
         </div>
-        {/* Sprint 16 v0.3 — agent metadata footer (only when present) */}
         {!isUser && (msg.tool_hops || msg.cost_usd || msg.latency_ms) && (
           <div
             style={{
@@ -797,7 +1022,9 @@ function MessageBubble({ msg }: { msg: Message }) {
             }}
           >
             {msg.tool_hops !== undefined && msg.tool_hops > 0 && (
-              <span>{msg.tool_hops} tool {msg.tool_hops === 1 ? "call" : "calls"}</span>
+              <span>
+                {msg.tool_hops} tool {msg.tool_hops === 1 ? "call" : "calls"}
+              </span>
             )}
             {msg.cost_usd !== undefined && msg.cost_usd > 0 && (
               <span>${msg.cost_usd.toFixed(4)}</span>
@@ -810,6 +1037,265 @@ function MessageBubble({ msg }: { msg: Message }) {
       </div>
     </div>
   );
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Sprint 16 v0.4 — ToolBatch + ToolCard
+// ──────────────────────────────────────────────────────────────────────
+
+function ToolBatch({ msg }: { msg: Message }) {
+  if (!msg.toolActivities || msg.toolActivities.length === 0) return null;
+  return (
+    <div
+      style={{
+        display: "flex",
+        gap: 8,
+        alignItems: "flex-start",
+      }}
+    >
+      <div
+        style={{
+          width: 26,
+          height: 26,
+          borderRadius: "50%",
+          background: "var(--design-bg2)",
+          border: "1px solid var(--design-border)",
+          display: "grid",
+          placeItems: "center",
+          fontSize: 11,
+          color: "var(--design-ink3)",
+          flexShrink: 0,
+          marginTop: 2,
+        }}
+        aria-hidden="true"
+      >
+        ⚙
+      </div>
+      <div
+        style={{
+          maxWidth: "78%",
+          display: "flex",
+          flexDirection: "column",
+          gap: 5,
+          flex: 1,
+          minWidth: 0,
+        }}
+      >
+        {msg.toolActivities.map((ta) => (
+          <ToolCard key={ta.toolUseId} activity={ta} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function ToolCard({ activity }: { activity: ToolActivity }) {
+  const [open, setOpen] = useState(false);
+  const hasResult = !!activity.toolResult;
+  const isError = !!activity.toolResult?.isError;
+  const isPending = !hasResult;
+
+  // Determine status: pending (no result yet), success (parsed ok:true),
+  // idempotent (parsed.idempotent_recovery=true), or error.
+  const parsed = activity.toolResult?.parsed as
+    | { ok?: boolean; idempotent_recovery?: boolean; cost_usd?: number; note?: string }
+    | null
+    | undefined;
+
+  const isIdempotent = parsed?.idempotent_recovery === true;
+  const isOk = parsed?.ok === true && !isError;
+  const costFromResult = typeof parsed?.cost_usd === "number" ? parsed.cost_usd : undefined;
+
+  const borderColor = isError
+    ? "#fecaca"
+    : isIdempotent
+    ? "#fde68a"
+    : isOk
+    ? "var(--design-border)"
+    : "var(--design-border)";
+  const accent = isError
+    ? "#dc2626"
+    : isIdempotent
+    ? "#b45309"
+    : isOk
+    ? "#16a34a"
+    : "var(--design-ink3)";
+
+  const statusGlyph = isError ? "!" : isIdempotent ? "↻" : isOk ? "✓" : "…";
+
+  return (
+    <div
+      style={{
+        border: `1px solid ${borderColor}`,
+        borderRadius: 8,
+        background: "var(--design-paper)",
+        overflow: "hidden",
+        fontSize: 12,
+      }}
+    >
+      <button
+        onClick={() => setOpen((o) => !o)}
+        style={{
+          width: "100%",
+          background: "none",
+          border: "none",
+          padding: "7px 10px",
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
+          cursor: "pointer",
+          color: "var(--design-ink2)",
+          textAlign: "left",
+        }}
+      >
+        <span
+          style={{
+            width: 16,
+            height: 16,
+            borderRadius: "50%",
+            background: accent,
+            color: "white",
+            display: "grid",
+            placeItems: "center",
+            fontSize: 10,
+            fontWeight: 700,
+            flexShrink: 0,
+          }}
+        >
+          {statusGlyph}
+        </span>
+        <span
+          style={{
+            fontFamily: "ui-monospace, 'JetBrains Mono', Menlo, monospace",
+            fontSize: 11,
+            color: "var(--design-ink)",
+            fontWeight: 500,
+            flex: 1,
+            minWidth: 0,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          }}
+        >
+          {activity.toolName}
+        </span>
+        {isPending && (
+          <span style={{ fontSize: 10, color: "var(--design-ink3)", fontStyle: "italic" }}>
+            running…
+          </span>
+        )}
+        {isIdempotent && (
+          <span style={{ fontSize: 10, color: "#b45309" }}>recovered</span>
+        )}
+        {costFromResult !== undefined && costFromResult > 0 && (
+          <span
+            style={{
+              fontSize: 10,
+              color: "var(--design-ink3)",
+              fontFamily: "ui-monospace, 'JetBrains Mono', Menlo, monospace",
+            }}
+          >
+            ${costFromResult.toFixed(4)}
+          </span>
+        )}
+        <span
+          style={{
+            fontSize: 8,
+            color: "var(--design-ink3)",
+            flexShrink: 0,
+            width: 8,
+            transition: "transform 0.15s ease",
+            transform: open ? "rotate(0deg)" : "rotate(-90deg)",
+            display: "inline-block",
+          }}
+        >
+          ▼
+        </span>
+      </button>
+
+      {open && (
+        <div
+          style={{
+            borderTop: `1px solid ${borderColor}`,
+            background: "var(--design-bg2)",
+            padding: "8px 10px",
+            fontFamily: "ui-monospace, 'JetBrains Mono', Menlo, monospace",
+            fontSize: 11,
+            color: "var(--design-ink2)",
+            display: "flex",
+            flexDirection: "column",
+            gap: 8,
+          }}
+        >
+          <div>
+            <div
+              style={{
+                fontSize: 9,
+                fontWeight: 600,
+                color: "var(--design-ink3)",
+                textTransform: "uppercase",
+                letterSpacing: "0.06em",
+                marginBottom: 4,
+              }}
+            >
+              Input
+            </div>
+            <pre
+              style={{
+                margin: 0,
+                whiteSpace: "pre-wrap",
+                wordBreak: "break-word",
+                lineHeight: 1.45,
+                maxHeight: 140,
+                overflowY: "auto",
+              }}
+            >
+              {formatJson(activity.toolInput)}
+            </pre>
+          </div>
+          {activity.toolResult && (
+            <div>
+              <div
+                style={{
+                  fontSize: 9,
+                  fontWeight: 600,
+                  color: isError ? "#dc2626" : "var(--design-ink3)",
+                  textTransform: "uppercase",
+                  letterSpacing: "0.06em",
+                  marginBottom: 4,
+                }}
+              >
+                {isError ? "Result (error)" : "Result"}
+              </div>
+              <pre
+                style={{
+                  margin: 0,
+                  whiteSpace: "pre-wrap",
+                  wordBreak: "break-word",
+                  lineHeight: 1.45,
+                  maxHeight: 200,
+                  overflowY: "auto",
+                  color: isError ? "#991b1b" : "var(--design-ink2)",
+                }}
+              >
+                {activity.toolResult.parsed
+                  ? formatJson(activity.toolResult.parsed)
+                  : activity.toolResult.rawContent.slice(0, 1200)}
+              </pre>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function formatJson(v: unknown): string {
+  try {
+    return JSON.stringify(v, null, 2);
+  } catch {
+    return String(v);
+  }
 }
 
 function buildInitialMessages(brief: Brief): Message[] {
