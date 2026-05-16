@@ -38,3 +38,25 @@ html, body {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.5; }
 }
+
+/*
+ * Sprint 16 v0.5 — designPulse
+ *
+ * Used on ToolCard status pills while a tool is mid-execution. Combines a
+ * subtle scale lift with an opacity dip so the user reads it as
+ * "instrument is live, currently transmitting", echoing the LIVE indicator
+ * pattern from technical telemetry displays. Stops the moment the
+ * tool_result event arrives.
+ */
+@keyframes designPulse {
+  0%, 100% {
+    opacity: 1;
+    transform: scale(1);
+    box-shadow: 0 0 0 0 rgba(201, 100, 66, 0.45);
+  }
+  50% {
+    opacity: 0.7;
+    transform: scale(1.08);
+    box-shadow: 0 0 0 4px rgba(201, 100, 66, 0);
+  }
+}
