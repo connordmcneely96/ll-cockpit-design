@@ -12,16 +12,45 @@ const SKILLS = [
 ] as const;
 
 // ──────────────────────────────────────────────────────────────────────
-// Sprint 16 v0.4 — tool transparency types
+// Sprint 16 v0.5 — streaming event types (mirror of hub StreamEvent)
 // ──────────────────────────────────────────────────────────────────────
+type StreamEvent =
+  | { type: "turn_start"; turn_index: number }
+  | { type: "agent_text"; turn_index: number; text: string }
+  | {
+      type: "tool_use";
+      turn_index: number;
+      tool_use_id: string;
+      tool_name: string;
+      tool_input: Record<string, unknown>;
+    }
+  | {
+      type: "tool_result";
+      tool_use_id: string;
+      content: string;
+      is_error: boolean;
+    }
+  | {
+      type: "done";
+      final_text: string;
+      tool_hops: number;
+      cost_usd: number;
+      input_tokens: number;
+      output_tokens: number;
+      latency_ms: number;
+    }
+  | { type: "error"; message: string };
 
+// ──────────────────────────────────────────────────────────────────────
+// Sprint 16 v0.4 — tool transparency types (preserved)
+// ──────────────────────────────────────────────────────────────────────
 type ToolActivity = {
   toolUseId: string;
   toolName: string;
   toolInput: Record<string, unknown>;
   toolResult?: {
     rawContent: string;
-    parsed?: unknown; // attempted JSON.parse of rawContent (success or null)
+    parsed?: unknown;
     isError: boolean;
   };
 };
@@ -38,8 +67,6 @@ type Message = {
   latency_ms?: number;
 };
 
-// Shape of design_chat_messages rows from GET /api/design/briefs/[id]/chat
-// (includes tool_results_json as of Sprint 16 v0.4)
 type HubChatMessageRow = {
   id: string;
   role: "user" | "assistant" | "tool_result";
@@ -47,19 +74,6 @@ type HubChatMessageRow = {
   tool_calls_json: string | null;
   tool_results_json: string | null;
   model_id: string | null;
-  cost_usd: number;
-  created_at: number;
-};
-
-// Shape of `turn_messages` returned from POST /api/design/briefs/[id]/chat
-// (Sprint 16 v0.4) — same shape as HubChatMessageRow, just role-narrowed
-// (no user rows in turn_messages — they're excluded by the hub).
-type HubTurnMessageRow = {
-  id: string;
-  role: "assistant" | "tool_result";
-  content: string | null;
-  tool_calls_json: string | null;
-  tool_results_json: string | null;
   cost_usd: number;
   created_at: number;
 };
@@ -99,25 +113,20 @@ export default function ChatPane({
     if (brief.status === "building") setAgentOpen(true);
   }, [brief.status]);
 
-  // Hydrate prior chat turns on mount, including tool activity
+  // Hydrate prior chat turns on mount, including tool activity (unchanged)
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const res = await fetch(`/api/design/briefs/${briefId}/chat`, {
-          method: "GET",
-        });
+        const res = await fetch(`/api/design/briefs/${briefId}/chat`, { method: "GET" });
         if (!res.ok) {
           setHistoryLoaded(true);
           return;
         }
         const data = (await res.json()) as { messages?: HubChatMessageRow[] };
         if (cancelled) return;
-
         const built = buildMessagesFromHistory(data.messages ?? []);
-        if (built.length > 0) {
-          setMessages(built);
-        }
+        if (built.length > 0) setMessages(built);
         setHistoryLoaded(true);
       } catch (err) {
         console.error("chat history load failed", err);
@@ -137,6 +146,14 @@ export default function ChatPane({
   const doneCount = subtasks.filter((t) => t.status === "done").length;
   const runningCount = subtasks.filter((t) => t.status === "running").length;
 
+  // ──────────────────────────────────────────────────────────────────
+  // Sprint 16 v0.5 — streaming send
+  //
+  // Sends `Accept: text/event-stream`, reads the response body as a
+  // ReadableStream, parses one SSE event at a time, dispatches each
+  // event to a state update. Cards appear AS the agent works, not at
+  // the end.
+  // ──────────────────────────────────────────────────────────────────
   async function handleSend() {
     const text = input.trim();
     if (!text || sending) return;
@@ -151,64 +168,169 @@ export default function ChatPane({
     };
     setMessages((prev) => [...prev, userMsg]);
 
+    // Per-stream local state. Maps live for the duration of this send call.
+    //   turnToolMessages: turn_index → id of the "tool" Message that batches
+    //     that turn's tool calls (so multiple tool_use events in one turn
+    //     share one ToolBatch render).
+    //   toolMap: tool_use_id → { msgId, activityIndex } for finding the
+    //     ToolActivity to mutate when its tool_result arrives.
+    const turnToolMessages = new Map<number, string>();
+    const toolMap = new Map<string, { msgId: string; activityIndex: number }>();
+    let streamHadAnyToolCalls = false;
+
+    function handleEvent(event: StreamEvent) {
+      switch (event.type) {
+        case "turn_start": {
+          // No visible change — the agent_text and tool_use events that
+          // follow will create the visible artifacts.
+          return;
+        }
+
+        case "agent_text": {
+          const newMsg: Message = {
+            id: crypto.randomUUID(),
+            role: "agent",
+            agent: "DESIGNER",
+            content: event.text,
+            created_at: Date.now(),
+          };
+          setMessages((prev) => [...prev, newMsg]);
+          return;
+        }
+
+        case "tool_use": {
+          streamHadAnyToolCalls = true;
+          const existingMsgId = turnToolMessages.get(event.turn_index);
+
+          if (existingMsgId) {
+            // Append to the existing tool batch for this turn
+            setMessages((prev) =>
+              prev.map((m) => {
+                if (m.id !== existingMsgId || m.role !== "tool" || !m.toolActivities) {
+                  return m;
+                }
+                const newIndex = m.toolActivities.length;
+                toolMap.set(event.tool_use_id, {
+                  msgId: existingMsgId,
+                  activityIndex: newIndex,
+                });
+                return {
+                  ...m,
+                  toolActivities: [
+                    ...m.toolActivities,
+                    {
+                      toolUseId: event.tool_use_id,
+                      toolName: event.tool_name,
+                      toolInput: event.tool_input,
+                    },
+                  ],
+                };
+              }),
+            );
+          } else {
+            // First tool of this turn — create a new tool batch
+            const newMsgId = crypto.randomUUID();
+            turnToolMessages.set(event.turn_index, newMsgId);
+            toolMap.set(event.tool_use_id, {
+              msgId: newMsgId,
+              activityIndex: 0,
+            });
+            const newMsg: Message = {
+              id: newMsgId,
+              role: "tool",
+              toolActivities: [
+                {
+                  toolUseId: event.tool_use_id,
+                  toolName: event.tool_name,
+                  toolInput: event.tool_input,
+                },
+              ],
+              created_at: Date.now(),
+            };
+            setMessages((prev) => [...prev, newMsg]);
+          }
+          return;
+        }
+
+        case "tool_result": {
+          const entry = toolMap.get(event.tool_use_id);
+          if (!entry) return;
+          setMessages((prev) =>
+            prev.map((m) => {
+              if (m.id !== entry.msgId || !m.toolActivities) return m;
+              const updated = [...m.toolActivities];
+              updated[entry.activityIndex] = {
+                ...updated[entry.activityIndex],
+                toolResult: {
+                  rawContent: event.content,
+                  parsed: safeJsonParse(event.content),
+                  isError: event.is_error,
+                },
+              };
+              return { ...m, toolActivities: updated };
+            }),
+          );
+          return;
+        }
+
+        case "done": {
+          // Attach total meta (cost, hops, latency) to the most recent agent
+          // text message, mirroring v0.4's footer placement.
+          setMessages((prev) => {
+            let lastAgentIdx = -1;
+            for (let i = prev.length - 1; i >= 0; i--) {
+              if (prev[i].role === "agent") {
+                lastAgentIdx = i;
+                break;
+              }
+            }
+            if (lastAgentIdx < 0) return prev;
+            const next = [...prev];
+            next[lastAgentIdx] = {
+              ...next[lastAgentIdx],
+              tool_hops: event.tool_hops,
+              cost_usd: event.cost_usd,
+              latency_ms: event.latency_ms,
+            };
+            return next;
+          });
+          if (onChatReply && streamHadAnyToolCalls) onChatReply();
+          return;
+        }
+
+        case "error": {
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: crypto.randomUUID(),
+              role: "agent",
+              agent: "DESIGNER",
+              content: `Something went wrong: ${event.message}`,
+              created_at: Date.now(),
+            },
+          ]);
+          return;
+        }
+      }
+    }
+
     try {
       const res = await fetch(`/api/design/briefs/${briefId}/chat`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "text/event-stream",
+        },
         body: JSON.stringify({ message: text, skill: activeSkill }),
       });
 
-      if (res.ok) {
-        const data = (await res.json()) as {
-          final_text?: string;
-          reply?: string;
-          message?: string;
-          agent?: string;
-          tool_hops?: number;
-          cost_usd?: number;
-          latency_ms?: number;
-          turn_messages?: HubTurnMessageRow[];
-        };
-
-        // v0.4 — render tool activity + final reply from turn_messages.
-        // Falls back to the legacy single-reply path if turn_messages is
-        // absent (e.g. hub on older code).
-        const turnsAsMessages = data.turn_messages
-          ? buildMessagesFromTurns(data.turn_messages, {
-              agentName: data.agent ?? "DESIGNER",
-              tool_hops: data.tool_hops,
-              cost_usd: data.cost_usd,
-              latency_ms: data.latency_ms,
-            })
-          : [];
-
-        if (turnsAsMessages.length > 0) {
-          setMessages((prev) => [...prev, ...turnsAsMessages]);
-        } else {
-          // Legacy fallback: single agent bubble with the reply text.
-          const replyText =
-            data.final_text ||
-            data.reply ||
-            data.message ||
-            "Got it — I made the change but didn't have anything to add.";
-          const agentMsg: Message = {
-            id: crypto.randomUUID(),
-            role: "agent",
-            agent: data.agent ?? "DESIGNER",
-            content: replyText,
-            created_at: Date.now(),
-            tool_hops: data.tool_hops,
-            cost_usd: data.cost_usd,
-            latency_ms: data.latency_ms,
-          };
-          setMessages((prev) => [...prev, agentMsg]);
+      if (!res.ok || !res.body) {
+        let errBody: { error?: string } = {};
+        try {
+          errBody = (await res.json()) as { error?: string };
+        } catch {
+          /* response body might not be JSON */
         }
-
-        if (onChatReply && (data.tool_hops ?? 0) > 0) {
-          onChatReply();
-        }
-      } else {
-        const errBody = await res.json().catch(() => ({}));
         setMessages((prev) => [
           ...prev,
           {
@@ -221,6 +343,54 @@ export default function ChatPane({
             created_at: Date.now(),
           },
         ]);
+        return;
+      }
+
+      // Stream reader. SSE events are `data: {...}\n\n` chunks. We accumulate
+      // bytes in `buffer`, then peel off complete events at each `\n\n`.
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        let boundary: number;
+        while ((boundary = buffer.indexOf("\n\n")) >= 0) {
+          const chunk = buffer.slice(0, boundary);
+          buffer = buffer.slice(boundary + 2);
+
+          // Each event chunk may have multiple lines. We only consume the
+          // first `data: ` line — the hub emits one JSON payload per event.
+          const dataLine = chunk.split("\n").find((l) => l.startsWith("data: "));
+          if (!dataLine) continue;
+          const json = dataLine.slice(6);
+
+          let event: StreamEvent;
+          try {
+            event = JSON.parse(json) as StreamEvent;
+          } catch {
+            console.warn("malformed SSE event", json.slice(0, 200));
+            continue;
+          }
+
+          handleEvent(event);
+        }
+      }
+
+      // Flush any trailing complete event in the buffer (rare but possible
+      // when the stream ends without a final \n\n separator).
+      if (buffer.trim().length > 0) {
+        const dataLine = buffer.split("\n").find((l) => l.startsWith("data: "));
+        if (dataLine) {
+          try {
+            handleEvent(JSON.parse(dataLine.slice(6)) as StreamEvent);
+          } catch {
+            /* discard */
+          }
+        }
       }
     } catch (err) {
       console.error("chat send error", err);
@@ -530,14 +700,11 @@ export default function ChatPane({
 }
 
 // ──────────────────────────────────────────────────────────────────────
-// Sprint 16 v0.4 — turn parsing helpers
+// Sprint 16 v0.4 — turn parsing helpers (history hydration only)
 // ──────────────────────────────────────────────────────────────────────
 
 function buildMessagesFromHistory(rows: HubChatMessageRow[]): Message[] {
   const result: Message[] = [];
-  // Map tool_use_id → ToolActivity reference so tool_result rows can mutate
-  // the corresponding tool activity. The references live inside `result`'s
-  // message.toolActivities array, so mutation propagates without re-keying.
   const toolMap = new Map<string, ToolActivity>();
 
   for (const row of rows) {
@@ -552,7 +719,6 @@ function buildMessagesFromHistory(rows: HubChatMessageRow[]): Message[] {
       continue;
     }
     if (row.role === "assistant") {
-      // Tool calls first (they happen before the assistant's text reply)
       if (row.tool_calls_json) {
         const calls = safeParseToolCalls(row.tool_calls_json);
         if (calls.length > 0) {
@@ -570,7 +736,6 @@ function buildMessagesFromHistory(rows: HubChatMessageRow[]): Message[] {
           });
         }
       }
-      // Then the assistant's text content (if any)
       if (row.content && row.content.trim()) {
         result.push({
           id: row.id,
@@ -596,82 +761,6 @@ function buildMessagesFromHistory(rows: HubChatMessageRow[]): Message[] {
         }
       }
     }
-  }
-
-  return result;
-}
-
-function buildMessagesFromTurns(
-  turns: HubTurnMessageRow[],
-  meta: {
-    agentName: string;
-    tool_hops?: number;
-    cost_usd?: number;
-    latency_ms?: number;
-  },
-): Message[] {
-  const result: Message[] = [];
-  const toolMap = new Map<string, ToolActivity>();
-
-  for (const row of turns) {
-    if (row.role === "assistant") {
-      if (row.tool_calls_json) {
-        const calls = safeParseToolCalls(row.tool_calls_json);
-        if (calls.length > 0) {
-          const activities: ToolActivity[] = calls.map((c) => ({
-            toolUseId: c.id,
-            toolName: c.name,
-            toolInput: c.input,
-          }));
-          for (const a of activities) toolMap.set(a.toolUseId, a);
-          result.push({
-            id: row.id + "_tools",
-            role: "tool",
-            toolActivities: activities,
-            created_at: row.created_at * 1000,
-          });
-        }
-      }
-      if (row.content && row.content.trim()) {
-        result.push({
-          id: row.id,
-          role: "agent",
-          agent: meta.agentName,
-          content: row.content,
-          created_at: row.created_at * 1000,
-          cost_usd: row.cost_usd,
-        });
-      }
-      continue;
-    }
-    if (row.role === "tool_result" && row.tool_results_json) {
-      const results = safeParseToolResults(row.tool_results_json);
-      for (const r of results) {
-        const ta = toolMap.get(r.tool_use_id);
-        if (ta) {
-          ta.toolResult = {
-            rawContent: r.content,
-            parsed: safeJsonParse(r.content),
-            isError: !!r.is_error,
-          };
-        }
-      }
-    }
-  }
-
-  // Attach overall meta (cost, hops, latency) to the LAST agent message
-  // so the footer in MessageBubble renders the same way as before.
-  const lastAgentIdx = (() => {
-    for (let i = result.length - 1; i >= 0; i--) if (result[i].role === "agent") return i;
-    return -1;
-  })();
-  if (lastAgentIdx >= 0) {
-    result[lastAgentIdx] = {
-      ...result[lastAgentIdx],
-      tool_hops: meta.tool_hops,
-      cost_usd: meta.cost_usd ?? result[lastAgentIdx].cost_usd,
-      latency_ms: meta.latency_ms,
-    };
   }
 
   return result;
@@ -1040,7 +1129,7 @@ function MessageBubble({ msg }: { msg: Message }) {
 }
 
 // ──────────────────────────────────────────────────────────────────────
-// Sprint 16 v0.4 — ToolBatch + ToolCard
+// Sprint 16 v0.4 — ToolBatch + ToolCard (preserved)
 // ──────────────────────────────────────────────────────────────────────
 
 function ToolBatch({ msg }: { msg: Message }) {
@@ -1095,8 +1184,6 @@ function ToolCard({ activity }: { activity: ToolActivity }) {
   const isError = !!activity.toolResult?.isError;
   const isPending = !hasResult;
 
-  // Determine status: pending (no result yet), success (parsed ok:true),
-  // idempotent (parsed.idempotent_recovery=true), or error.
   const parsed = activity.toolResult?.parsed as
     | { ok?: boolean; idempotent_recovery?: boolean; cost_usd?: number; note?: string }
     | null
@@ -1160,6 +1247,9 @@ function ToolCard({ activity }: { activity: ToolActivity }) {
             fontSize: 10,
             fontWeight: 700,
             flexShrink: 0,
+            // v0.5 — soft pulse while pending so the user sees it's alive,
+            // not stalled. The pulse stops when the result arrives.
+            animation: isPending ? "designPulse 1.4s ease-in-out infinite" : undefined,
           }}
         >
           {statusGlyph}
