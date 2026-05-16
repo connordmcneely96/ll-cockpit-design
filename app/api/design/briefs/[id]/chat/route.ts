@@ -1,14 +1,23 @@
 /**
- * POST /api/design/briefs/[id]/chat — Sprint 16 v0.3 Slice 1
- * GET  /api/design/briefs/[id]/chat — list prior messages
+ * POST /api/design/briefs/[id]/chat — Sprint 16 v0.5.0 (live streaming)
+ * GET  /api/design/briefs/[id]/chat — list prior messages (unchanged)
  *
  * Proxies the iteration agent chat to the hub via service binding.
  * Per Sprint 20 ADR: cross-Worker calls go through env.HUB.fetch, never
  * via public URL.
  *
- * The hub (POST /api/design/briefs/[id]/chat) accepts Authorization: Bearer
- * and runs the iteration agent (update_design_tokens, regenerate_section,
- * critique, save_iteration, apply_token_to_html — see iteration-agent.ts).
+ * STREAMING PATH (v0.5.0):
+ *   When the client sends `Accept: text/event-stream`, this route forwards
+ *   that header to the hub and pipes the hub's SSE body straight back to
+ *   the client without buffering. Using `await hubRes.json()` here would
+ *   collect the entire response before flushing — that's what we had
+ *   previously and it's why tool cards only appeared after the whole
+ *   agent loop finished. Now they arrive one at a time.
+ *
+ * LEGACY JSON PATH:
+ *   When the client doesn't request streaming (or hubRes.body is unexpectedly
+ *   empty), we fall back to the v0.4 JSON path with turn_messages. Kept for
+ *   non-browser API consumers and as a defensive fallback.
  */
 import { cookies } from 'next/headers'
 import { validateToken } from '@/lib/auth'
@@ -48,6 +57,11 @@ export async function POST(
     return Response.json({ ok: false, error: 'invalid_json' }, { status: 400 })
   }
 
+  // v0.5.0 — detect streaming request from the browser
+  const wantsStream = (req.headers.get('accept') ?? '').includes(
+    'text/event-stream',
+  )
+
   try {
     const env = getCloudflareContext().env as unknown as Env
     const hubRes = await env.HUB.fetch(
@@ -57,11 +71,37 @@ export async function POST(
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${token}`,
+          // Forward the Accept header so the hub knows to emit SSE
+          ...(wantsStream ? { Accept: 'text/event-stream' } : {}),
         },
         body: JSON.stringify(body),
       },
     )
 
+    // v0.5.0 — when the client wants streaming AND the hub returned a body,
+    // pass the body through untouched. Cloudflare service bindings preserve
+    // streaming for both request and response bodies, so the SSE chunks
+    // flow client-side as the hub emits them.
+    //
+    // CRITICAL: do not call hubRes.json() / hubRes.text() / hubRes.arrayBuffer()
+    // here — any of those would buffer the full response, collapsing back to
+    // the v0.4 "all at once" behavior.
+    if (wantsStream && hubRes.body) {
+      return new Response(hubRes.body, {
+        status: hubRes.status,
+        headers: {
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-cache, no-transform',
+          Connection: 'keep-alive',
+          // Defensive against Cloudflare buffering when the response is
+          // proxied through extra hops. Real-time SSE relies on flushing
+          // each event as it's enqueued upstream.
+          'X-Accel-Buffering': 'no',
+        },
+      })
+    }
+
+    // Legacy JSON path — non-streaming clients keep working.
     const data = await hubRes.json().catch(() => ({
       ok: false,
       error: 'hub_returned_non_json',
