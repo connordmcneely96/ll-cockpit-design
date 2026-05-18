@@ -13,10 +13,9 @@
  *
  * Response: application/zip with filename "{client_name}.zip"
  *
- * Fix (18K-B2.1): wrap zipData in new Blob([zipData]) before passing to
- * Response constructor. TypeScript 5.x infers buildZip return as
- * Uint8Array<ArrayBufferLike>; BodyInit requires ArrayBuffer specifically.
- * Blob accepts Uint8Array<ArrayBufferLike> and is valid BodyInit.
+ * TypeScript note: concat() and buildZip() are explicitly typed as returning
+ * Uint8Array<ArrayBuffer> (not the wider Uint8Array<ArrayBufferLike>) so the
+ * value satisfies BlobPart → ArrayBufferView<ArrayBuffer> in TS 5.x lib.dom.d.ts.
  */
 import { cookies } from "next/headers";
 import { validateToken } from "@/lib/auth";
@@ -59,8 +58,6 @@ type IterationRow = {
 };
 
 // ── Minimal ZIP writer (STORE method, no compression) ────────────────────────
-// Implements the ZIP local file + central directory + EOCD structure per
-// PKWARE Application Note. CRC-32 computed with the standard polynomial.
 
 function makeCRC32Table(): Uint32Array {
   const t = new Uint32Array(256);
@@ -80,15 +77,19 @@ function crc32(data: Uint8Array): number {
   return ((crc ^ 0xffffffff) >>> 0);
 }
 
-function u16(n: number): Uint8Array {
+function u16(n: number): Uint8Array<ArrayBuffer> {
   return new Uint8Array([n & 0xff, (n >> 8) & 0xff]);
 }
 
-function u32(n: number): Uint8Array {
+function u32(n: number): Uint8Array<ArrayBuffer> {
   return new Uint8Array([n & 0xff, (n >> 8) & 0xff, (n >> 16) & 0xff, (n >> 24) & 0xff]);
 }
 
-function concat(arrays: Uint8Array[]): Uint8Array {
+// Explicit return type Uint8Array<ArrayBuffer> — new Uint8Array(total) always
+// allocates a concrete ArrayBuffer, never a SharedArrayBuffer. Without this
+// annotation TypeScript 5.x widens the return to Uint8Array<ArrayBufferLike>,
+// which is rejected by BlobPart and BodyInit downstream.
+function concat(arrays: Uint8Array[]): Uint8Array<ArrayBuffer> {
   const total = arrays.reduce((s, a) => s + a.length, 0);
   const out = new Uint8Array(total);
   let pos = 0;
@@ -96,7 +97,7 @@ function concat(arrays: Uint8Array[]): Uint8Array {
   return out;
 }
 
-function buildZip(files: Array<{ name: string; data: Uint8Array }>): Uint8Array {
+function buildZip(files: Array<{ name: string; data: Uint8Array }>): Uint8Array<ArrayBuffer> {
   const enc = new TextEncoder();
   const localParts: Uint8Array[] = [];
   const centralParts: Uint8Array[] = [];
@@ -107,7 +108,6 @@ function buildZip(files: Array<{ name: string; data: Uint8Array }>): Uint8Array 
     const crc = crc32(data);
     const size = data.length;
 
-    // Local file header (30 bytes fixed + filename + data)
     const localHeader = concat([
       new Uint8Array([0x50, 0x4b, 0x03, 0x04]),
       u16(20), u16(0), u16(0), u16(0), u16(0),
@@ -118,7 +118,6 @@ function buildZip(files: Array<{ name: string; data: Uint8Array }>): Uint8Array 
     ]);
     localParts.push(localHeader);
 
-    // Central directory entry (46 bytes fixed + filename)
     centralParts.push(concat([
       new Uint8Array([0x50, 0x4b, 0x01, 0x02]),
       u16(20), u16(20), u16(0), u16(0), u16(0), u16(0),
@@ -134,7 +133,6 @@ function buildZip(files: Array<{ name: string; data: Uint8Array }>): Uint8Array 
   const cdData = concat(centralParts);
   const cdOffset = offset;
 
-  // End of central directory record (22 bytes)
   const eocd = concat([
     new Uint8Array([0x50, 0x4b, 0x05, 0x06]),
     u16(0), u16(0),
@@ -167,11 +165,9 @@ export async function POST(
     const env = getCloudflareContext().env as unknown as Env;
     const enc = new TextEncoder();
 
-    // Fetch brief metadata (ownership check + client_name for filename)
     const brief = await env.DB
       .prepare(
-        `SELECT id, client_name, status FROM design_briefs
-         WHERE id = ? AND user_id = ?`,
+        `SELECT id, client_name, status FROM design_briefs WHERE id = ? AND user_id = ?`,
       )
       .bind(briefId, auth.userId)
       .first<{ id: string; client_name: string; status: string }>();
@@ -179,7 +175,6 @@ export async function POST(
     if (!brief)
       return Response.json({ error: "not_found" }, { status: 404 });
 
-    // Fetch latest iteration
     const iteration = await env.DB
       .prepare(
         `SELECT i.id, i.iteration_number, i.design_tokens_json, i.page_html,
@@ -257,7 +252,6 @@ export async function POST(
 
       if (iteration.page_html) {
         zipFiles.push({ name: "pages/index.html", data: enc.encode(iteration.page_html) });
-
         const styleMatch = iteration.page_html.match(/<style[^>]*>([\s\S]*?)<\/style>/i);
         if (styleMatch?.[1]?.trim()) {
           zipFiles.push({ name: "stylesheets/styles.css", data: enc.encode(styleMatch[1].trim()) });
@@ -279,9 +273,6 @@ export async function POST(
       .replace(/^-|-$/g, "")
       .slice(0, 60) || "project";
 
-    // Wrap in Blob — Blob accepts Uint8Array<ArrayBufferLike> and is valid
-    // BodyInit, avoiding the TypeScript 5.x ArrayBufferLike vs ArrayBuffer
-    // incompatibility when passing Uint8Array directly to Response.
     return new Response(new Blob([zipData]), {
       headers: {
         "Content-Type": "application/zip",
