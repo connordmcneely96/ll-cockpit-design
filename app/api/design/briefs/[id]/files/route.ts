@@ -1,19 +1,24 @@
 /**
  * GET /api/design/briefs/[id]/files
  *
- * Returns virtual files derived from the brief's latest iteration AND
- * any completed COMPOSER subtasks (mid-stream visibility).
+ * Sprint 18K Phase B (B1) — reads real project files from R2 via the
+ * design_brief_files table written by hub's writeProjectFilesToR2 after
+ * ASSEMBLER completes. Falls back to virtual extraction from design_iterations
+ * for pre-18K briefs that have no design_brief_files rows.
  *
- * Files when iteration is done:
- *   - pages/index.html       (page_html as-is, the assembled output)
- *   - stylesheets/styles.css (extracted <style> from page_html OR design_tokens)
- *   - components/app.jsx     (extracted React if present)
- *   - design-tokens.json     (DESIGNER output, pretty-printed)
+ * Real files (post-18K, source = 'r2'):
+ *   - design-tokens.json        (DESIGNER output)
+ *   - pages/index.html          (assembled page)
+ *   - stylesheets/styles.css    (extracted <style>)
+ *   - components/{slug}.html    (one per COMPOSER section)
+ *   - components/app.jsx        (if present)
  *
- * Files while iteration is building:
- *   - design-tokens.json                    (as soon as DESIGNER done)
- *   - components/{slug}.html                (one per COMPOSER done — show progress)
- *   - pages/index.html                      (as soon as ASSEMBLER done)
+ * Virtual files (pre-18K fallback, source = 'virtual'):
+ *   - pages/index.html          (page_html as-is)
+ *   - stylesheets/styles.css    (extracted <style> from page_html)
+ *   - components/app.jsx        (extracted React if present)
+ *   - design-tokens.json        (DESIGNER output, pretty-printed)
+ *   - components/{slug}.html    (one per completed COMPOSER subtask)
  */
 import { cookies } from "next/headers";
 import { validateToken } from "@/lib/auth";
@@ -30,6 +35,9 @@ type Env = {
       };
     };
   };
+  R2: {
+    get: (key: string) => Promise<{ text: () => Promise<string> } | null>;
+  };
 };
 
 type IterationRow = {
@@ -39,6 +47,13 @@ type IterationRow = {
   page_html: string | null;
   preview_url: string | null;
   status: string;
+};
+
+type BriefFileRow = {
+  file_path: string;
+  r2_key: string;
+  file_type: "html" | "css" | "jsx" | "json";
+  source: string;
 };
 
 type SubtaskRow = {
@@ -53,8 +68,10 @@ type FileEntry = {
   path: string;
   type: "html" | "css" | "jsx" | "json";
   content: string;
-  source?: "iteration" | "composer" | "designer";
+  source?: "r2" | "iteration" | "composer" | "designer" | "virtual";
 };
+
+// ── virtual-extraction helpers (pre-18K fallback) ────────────────────
 
 function extractStyleTag(html: string): string {
   const match = html.match(/<style[^>]*>([\s\S]*?)<\/style>/i);
@@ -62,12 +79,13 @@ function extractStyleTag(html: string): string {
 }
 
 function extractReactComponent(html: string): string {
-  const match = html.match(/<script[^>]*type=["']text\/jsx["'][^>]*>([\s\S]*?)<\/script>/i);
+  const match = html.match(
+    /<script[^>]*type=["']text\/jsx["'][^>]*>([\s\S]*?)<\/script>/i,
+  );
   return match ? match[1].trim() : "";
 }
 
 function slugifyTitle(title: string): string {
-  // "Compose Hero section" → "hero"
   return title
     .replace(/^Compose\s+/i, "")
     .replace(/\s+section\s*$/i, "")
@@ -79,31 +97,35 @@ function slugifyTitle(title: string): string {
 
 export async function GET(
   req: Request,
-  ctx: { params: Promise<{ id: string }> }
+  ctx: { params: Promise<{ id: string }> },
 ) {
   const { id: briefId } = await ctx.params;
 
   const cookieStore = await cookies();
   const token = cookieStore.get("sb-access-token")?.value;
-  if (!token) return Response.json({ files: [], error: "no_session" }, { status: 401 });
+  if (!token)
+    return Response.json({ files: [], error: "no_session" }, { status: 401 });
 
   const auth = await validateToken(token);
-  if (!auth) return Response.json({ files: [], error: "invalid_token" }, { status: 401 });
+  if (!auth)
+    return Response.json(
+      { files: [], error: "invalid_token" },
+      { status: 401 },
+    );
 
   try {
     const env = getCloudflareContext().env as unknown as Env;
 
+    // Fetch latest iteration (ownership check via JOIN on user_id)
     const iteration = await env.DB
       .prepare(
         `SELECT i.id, i.iteration_number, i.design_tokens_json, i.page_html,
-                i.preview_url, i.status,
-                b.orchestrator_run_id
+                i.preview_url, i.status, b.orchestrator_run_id
          FROM design_iterations i
          JOIN design_briefs b ON b.id = i.brief_id
-         WHERE i.brief_id = ?
-           AND b.user_id = ?
+         WHERE i.brief_id = ? AND b.user_id = ?
          ORDER BY i.iteration_number DESC
-         LIMIT 1`
+         LIMIT 1`,
       )
       .bind(briefId, auth.userId)
       .first<IterationRow & { orchestrator_run_id: string | null }>();
@@ -112,25 +134,75 @@ export async function GET(
       return Response.json({ files: [], error: "not_found" }, { status: 404 });
     }
 
+    // ── Sprint 18K Phase B: check design_brief_files for real R2 files ──
+    const realFilesResult = await env.DB
+      .prepare(
+        `SELECT file_path, r2_key, file_type, source
+         FROM design_brief_files
+         WHERE brief_id = ? AND iteration_id = ?
+         ORDER BY source ASC, file_path ASC`,
+      )
+      .bind(briefId, iteration.id)
+      .all<BriefFileRow>();
+
+    const realFileRows = realFilesResult.results ?? [];
+
+    if (realFileRows.length > 0) {
+      // Real files exist — read each from R2
+      const files: FileEntry[] = [];
+      for (const row of realFileRows) {
+        try {
+          const obj = await env.R2.get(row.r2_key);
+          if (!obj) continue;
+          const content = await obj.text();
+          files.push({
+            path: row.file_path,
+            type: row.file_type,
+            content,
+            source: "r2",
+          });
+        } catch (err) {
+          // Skip unreadable file rather than failing the whole response
+          console.error(`R2 read failed for ${row.r2_key}`, err);
+        }
+      }
+      return Response.json({
+        files,
+        iteration: {
+          id: iteration.id,
+          iteration_number: iteration.iteration_number,
+          status: iteration.status,
+        },
+        source: "r2",
+      });
+    }
+
+    // ── Fallback: virtual extraction for pre-18K briefs ──────────────
+    // No design_brief_files rows means this brief was built before Sprint 18K.
+    // Extract files inline from the stored design_iterations columns.
     const files: FileEntry[] = [];
 
     // Design tokens — available as soon as DESIGNER finishes
     if (iteration.design_tokens_json) {
       let prettyTokens = iteration.design_tokens_json;
       try {
-        prettyTokens = JSON.stringify(JSON.parse(iteration.design_tokens_json), null, 2);
-      } catch { /* leave as-is */ }
+        prettyTokens = JSON.stringify(
+          JSON.parse(iteration.design_tokens_json),
+          null,
+          2,
+        );
+      } catch {
+        /* leave as-is */
+      }
       files.push({
         path: "design-tokens.json",
         type: "json",
         content: prettyTokens,
-        source: "designer",
+        source: "virtual",
       });
     }
 
-    // Composer sections (mid-stream visibility)
-    // Even before the iteration is assembled, each completed COMPOSER subtask
-    // contributes a virtual component file.
+    // Composer sections (mid-stream visibility for pre-18K builds)
     if (iteration.orchestrator_run_id) {
       const subtasks = await env.DB
         .prepare(
@@ -140,7 +212,7 @@ export async function GET(
              AND agent_name = 'composer'
              AND status = 'done'
              AND output IS NOT NULL
-           ORDER BY short_id ASC`
+           ORDER BY short_id ASC`,
         )
         .bind(iteration.orchestrator_run_id)
         .all<SubtaskRow>();
@@ -152,7 +224,7 @@ export async function GET(
           path: `components/${slug}.html`,
           type: "html",
           content: t.output,
-          source: "composer",
+          source: "virtual",
         });
       }
     }
@@ -166,7 +238,7 @@ export async function GET(
         path: "pages/index.html",
         type: "html",
         content: iteration.page_html,
-        source: "iteration",
+        source: "virtual",
       });
 
       if (styles) {
@@ -174,7 +246,7 @@ export async function GET(
           path: "stylesheets/styles.css",
           type: "css",
           content: styles,
-          source: "iteration",
+          source: "virtual",
         });
       }
       if (jsx) {
@@ -182,7 +254,7 @@ export async function GET(
           path: "components/app.jsx",
           type: "jsx",
           content: jsx,
-          source: "iteration",
+          source: "virtual",
         });
       }
     }
@@ -194,12 +266,13 @@ export async function GET(
         iteration_number: iteration.iteration_number,
         status: iteration.status,
       },
+      source: "virtual",
     });
   } catch (err) {
     console.error("files route error", err);
     return Response.json(
       { files: [], error: err instanceof Error ? err.message : "db_error" },
-      { status: 500 }
+      { status: 500 },
     );
   }
 }
