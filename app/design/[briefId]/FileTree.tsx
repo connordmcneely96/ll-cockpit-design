@@ -38,6 +38,8 @@ export default function FileTree({
   const [files, setFiles] = useState<DesignFile[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // Sprint 18K B3 — export state
+  const [exporting, setExporting] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -68,6 +70,32 @@ export default function FileTree({
     };
   }, [briefId, refreshKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Sprint 18K B3 — trigger ZIP download via export route
+  async function handleExport() {
+    if (exporting || files.length === 0) return;
+    setExporting(true);
+    try {
+      const res = await fetch(`/api/design/briefs/${briefId}/export`, {
+        method: "POST",
+      });
+      if (!res.ok) throw new Error(`export_failed_${res.status}`);
+      const blob = await res.blob();
+      const disposition = res.headers.get("content-disposition") ?? "";
+      const nameMatch = disposition.match(/filename="([^"]+)"/);
+      const filename = nameMatch?.[1] ?? "project.zip";
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error("export failed", err);
+    } finally {
+      setExporting(false);
+    }
+  }
+
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden", background: "var(--design-bg)" }}>
       <div
@@ -86,11 +114,38 @@ export default function FileTree({
         }}
       >
         <span>Files</span>
-        {files.length > 0 && (
-          <span style={{ fontWeight: 400, color: "var(--design-ink3)", fontSize: 10 }}>
-            {files.length}
-          </span>
-        )}
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          {files.length > 0 && (
+            <span style={{ fontWeight: 400, color: "var(--design-ink3)", fontSize: 10 }}>
+              {files.length}
+            </span>
+          )}
+          {/* Sprint 18K B3 — export button, only shown when files are ready */}
+          {files.length > 0 && (
+            <button
+              onClick={handleExport}
+              disabled={exporting}
+              title="Download all files as ZIP"
+              style={{
+                background: "transparent",
+                border: "1px solid var(--design-border)",
+                borderRadius: 4,
+                padding: "2px 7px",
+                fontSize: 10,
+                color: exporting ? "var(--design-ink3)" : "var(--design-ink2)",
+                cursor: exporting ? "default" : "pointer",
+                display: "flex",
+                alignItems: "center",
+                gap: 4,
+                lineHeight: 1.4,
+                opacity: exporting ? 0.5 : 1,
+                transition: "opacity 0.15s",
+              }}
+            >
+              {exporting ? "…" : "⬇ Export"}
+            </button>
+          )}
+        </div>
       </div>
 
       <div style={{ flex: 1, overflowY: "auto", padding: "8px 0" }}>
