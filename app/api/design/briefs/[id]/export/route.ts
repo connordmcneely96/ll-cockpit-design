@@ -12,6 +12,11 @@
  * with all ZIP tools and OS unpackers.
  *
  * Response: application/zip with filename "{client_name}.zip"
+ *
+ * Fix (18K-B2.1): wrap zipData in new Blob([zipData]) before passing to
+ * Response constructor. TypeScript 5.x infers buildZip return as
+ * Uint8Array<ArrayBufferLike>; BodyInit requires ArrayBuffer specifically.
+ * Blob accepts Uint8Array<ArrayBufferLike> and is valid BodyInit.
  */
 import { cookies } from "next/headers";
 import { validateToken } from "@/lib/auth";
@@ -105,7 +110,7 @@ function buildZip(files: Array<{ name: string; data: Uint8Array }>): Uint8Array 
     // Local file header (30 bytes fixed + filename + data)
     const localHeader = concat([
       new Uint8Array([0x50, 0x4b, 0x03, 0x04]),
-      u16(20), u16(0), u16(0), u16(0), u16(0), // ver needed, flags, method, mtime, mdate
+      u16(20), u16(0), u16(0), u16(0), u16(0),
       u32(crc), u32(size), u32(size),
       u16(nameBytes.length), u16(0),
       nameBytes,
@@ -116,10 +121,10 @@ function buildZip(files: Array<{ name: string; data: Uint8Array }>): Uint8Array 
     // Central directory entry (46 bytes fixed + filename)
     centralParts.push(concat([
       new Uint8Array([0x50, 0x4b, 0x01, 0x02]),
-      u16(20), u16(20), u16(0), u16(0), u16(0), u16(0), // ver made, ver needed, flags, method, mtime, mdate
+      u16(20), u16(20), u16(0), u16(0), u16(0), u16(0),
       u32(crc), u32(size), u32(size),
-      u16(nameBytes.length), u16(0), u16(0), // extra len, comment len
-      u16(0), u16(0), u32(0), u32(offset),   // disk start, int attr, ext attr, local hdr offset
+      u16(nameBytes.length), u16(0), u16(0),
+      u16(0), u16(0), u32(0), u32(offset),
       nameBytes,
     ]));
 
@@ -274,7 +279,10 @@ export async function POST(
       .replace(/^-|-$/g, "")
       .slice(0, 60) || "project";
 
-    return new Response(zipData, {
+    // Wrap in Blob — Blob accepts Uint8Array<ArrayBufferLike> and is valid
+    // BodyInit, avoiding the TypeScript 5.x ArrayBufferLike vs ArrayBuffer
+    // incompatibility when passing Uint8Array directly to Response.
+    return new Response(new Blob([zipData]), {
       headers: {
         "Content-Type": "application/zip",
         "Content-Disposition": `attachment; filename="${safeFilename}.zip"`,
