@@ -1,16 +1,35 @@
 "use client";
 
 import { useState } from "react";
+import dynamic from "next/dynamic";
 import type { DesignFile } from "./FileTree";
+
+/**
+ * Sprint 18O — Monaco editor replaces the <pre> code block.
+ * Loaded dynamically with ssr:false — Monaco uses browser-only APIs
+ * (ResizeObserver, workers, DOM measurements) and cannot run on the edge.
+ * The <pre> fallback renders while Monaco initialises from CDN.
+ */
+const MonacoEditor = dynamic(
+  () => import("@monaco-editor/react").then((m) => m.default),
+  { ssr: false },
+);
+
+function monacoLanguage(type: DesignFile["type"]): string {
+  const map: Record<DesignFile["type"], string> = {
+    html: "html",
+    css: "css",
+    jsx: "javascript",
+    json: "json",
+  };
+  return map[type] ?? "plaintext";
+}
 
 type Props = {
   briefId: string;
   files: DesignFile[];
   selectedFile: string | null;
   briefStatus: "building" | "done" | "error";
-  // Sprint 16 v0.3 — bump this when the iteration agent re-uploads R2
-  // (update_design_tokens, regenerate_section, save_iteration) so the
-  // preview iframe cache-busts and reloads.
   refreshKey?: number;
 };
 
@@ -86,7 +105,7 @@ export default function CodeViewer({
 
       <div style={{ flex: 1, overflow: "hidden", position: "relative" }}>
         {viewMode === "code" ? (
-          <CodeBlock content={activeFile.content} />
+          <MonacoBlock content={activeFile.content} type={activeFile.type} />
         ) : (
           <PreviewFrame
             briefId={briefId}
@@ -99,41 +118,44 @@ export default function CodeViewer({
   );
 }
 
-function EmptyState({ briefStatus }: { briefStatus: Props["briefStatus"] }) {
+// Sprint 18O — Monaco editor pane
+function MonacoBlock({
+  content,
+  type,
+}: {
+  content: string;
+  type: DesignFile["type"];
+}) {
   return (
-    <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100%", background: "var(--design-paper)" }}>
-      <div
-        style={{
-          border: "1.5px dashed var(--design-border)",
-          borderRadius: 12,
-          padding: "40px 48px",
-          textAlign: "center",
-          maxWidth: 340,
+    <div style={{ height: "100%", background: "#1e1e2e" }}>
+      <MonacoEditor
+        height="100%"
+        language={monacoLanguage(type)}
+        value={content}
+        theme="vs-dark"
+        options={{
+          readOnly: true,
+          minimap: { enabled: false },
+          scrollBeyondLastLine: false,
+          fontSize: 12,
+          lineHeight: 19,
+          wordWrap: "on",
+          folding: true,
+          lineNumbers: "on",
+          renderLineHighlight: "none",
+          overviewRulerLanes: 0,
+          hideCursorInOverviewRuler: true,
+          scrollbar: { verticalScrollbarSize: 6, horizontalScrollbarSize: 6 },
+          padding: { top: 16, bottom: 16 },
         }}
-      >
-        <div style={{ fontSize: 28, marginBottom: 12 }}>
-          {briefStatus === "building" ? "⏳" : briefStatus === "error" ? "⚠️" : "📄"}
-        </div>
-        <div style={{ fontSize: 15, fontWeight: 600, color: "var(--design-ink)", marginBottom: 8 }}>
-          {briefStatus === "building"
-            ? "Your design is building…"
-            : briefStatus === "error"
-            ? "Build encountered an error"
-            : "No files available yet"}
-        </div>
-        <div style={{ fontSize: 13, color: "var(--design-ink3)", lineHeight: 1.6 }}>
-          {briefStatus === "building"
-            ? "Files will appear in the tree as each section completes."
-            : briefStatus === "error"
-            ? "Use the chat to describe what went wrong and the agents will retry."
-            : "Files populate from the pipeline output."}
-        </div>
-      </div>
+        loading={<CodeFallback content={content} />}
+      />
     </div>
   );
 }
 
-function CodeBlock({ content }: { content: string }) {
+// Fallback shown while Monaco loads from CDN — matches old <pre> style exactly
+function CodeFallback({ content }: { content: string }) {
   return (
     <div
       style={{
@@ -156,6 +178,55 @@ function CodeBlock({ content }: { content: string }) {
       >
         {content}
       </pre>
+    </div>
+  );
+}
+
+function EmptyState({ briefStatus }: { briefStatus: Props["briefStatus"] }) {
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        height: "100%",
+        background: "var(--design-paper)",
+      }}
+    >
+      <div
+        style={{
+          border: "1.5px dashed var(--design-border)",
+          borderRadius: 12,
+          padding: "40px 48px",
+          textAlign: "center",
+          maxWidth: 340,
+        }}
+      >
+        <div style={{ fontSize: 28, marginBottom: 12 }}>
+          {briefStatus === "building" ? "⏳" : briefStatus === "error" ? "⚠️" : "📄"}
+        </div>
+        <div
+          style={{
+            fontSize: 15,
+            fontWeight: 600,
+            color: "var(--design-ink)",
+            marginBottom: 8,
+          }}
+        >
+          {briefStatus === "building"
+            ? "Your design is building…"
+            : briefStatus === "error"
+            ? "Build encountered an error"
+            : "No files available yet"}
+        </div>
+        <div style={{ fontSize: 13, color: "var(--design-ink3)", lineHeight: 1.6 }}>
+          {briefStatus === "building"
+            ? "Files will appear in the tree as each section completes."
+            : briefStatus === "error"
+            ? "Use the chat to describe what went wrong and the agents will retry."
+            : "Files populate from the pipeline output."}
+        </div>
+      </div>
     </div>
   );
 }
@@ -189,8 +260,6 @@ function PreviewFrame({
     );
   }
 
-  // Sprint 16 v0.3 — cache-bust on refreshKey + key prop forces full iframe
-  // remount, the only reliable way to force the browser to refetch.
   return (
     <iframe
       key={`preview-${refreshKey}`}
