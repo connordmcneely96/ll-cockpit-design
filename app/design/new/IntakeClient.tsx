@@ -47,6 +47,8 @@ export default function IntakeClient() {
   const [brandColors, setBrandColors] = useState("");
   const [constraints, setConstraints] = useState("");
   const [selectedSkill, setSelectedSkill] = useState<SkillId>(defaultSkill);
+  // Sprint 18Y — tweaks panel opt-in
+  const [tweaksPanelEnabled, setTweaksPanelEnabled] = useState(false);
 
   // Sprint 18E — attached design system state
   const [attachedSystem, setAttachedSystem] = useState<AttachedSystem | null>(null);
@@ -109,6 +111,10 @@ export default function IntakeClient() {
         .map((s) => s.trim())
         .filter(Boolean);
 
+      // Sprint 18Y — build skills array from opt-ins
+      const skills: string[] = [];
+      if (tweaksPanelEnabled) skills.push("tweaks-panel");
+
       const res = await fetch("/api/design/briefs", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -125,6 +131,8 @@ export default function IntakeClient() {
           project_type: projectType,
           // Sprint 18E — pass attached system to pipeline
           attached_design_system_slug: attachedSystem?.slug,
+          // Sprint 18Y — skills (e.g. ['tweaks-panel'])
+          skills: skills.length ? skills : undefined,
         }),
       });
 
@@ -306,6 +314,42 @@ export default function IntakeClient() {
               </button>
             ))}
           </div>
+        </Section>
+
+        {/* Sprint 18Y — Tweaks panel opt-in */}
+        <Section
+          label="Interactive tweaks"
+          help="Adds a floating toolbar to the generated design so clients can try light/dark mode and swap accent colours without a rebuild."
+        >
+          <label
+            style={{
+              display: "flex",
+              alignItems: "flex-start",
+              gap: 10,
+              cursor: "pointer",
+              padding: "10px 12px",
+              border: `1px solid ${tweaksPanelEnabled ? "var(--design-terracotta)" : "var(--design-border)"}`,
+              borderRadius: 8,
+              background: tweaksPanelEnabled ? "var(--design-terracotta-soft)" : "transparent",
+              transition: "all 0.15s ease",
+            }}
+          >
+            <input
+              type="checkbox"
+              checked={tweaksPanelEnabled}
+              onChange={(e) => setTweaksPanelEnabled(e.target.checked)}
+              style={{ marginTop: 2, accentColor: "var(--design-terracotta)", flexShrink: 0 }}
+            />
+            <div>
+              <div style={{ fontSize: 13, fontWeight: 500, color: "var(--design-ink)", marginBottom: 2 }}>
+                Include tweaks panel
+              </div>
+              <div style={{ fontSize: 12, color: "var(--design-ink3)", lineHeight: 1.4 }}>
+                Light / dark mode toggle + 5 accent colour swatches baked into the output.
+                Preferences saved in the client’s browser.
+              </div>
+            </div>
+          </label>
         </Section>
 
         <Section label="Client name" required>
