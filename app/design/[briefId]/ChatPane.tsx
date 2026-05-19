@@ -12,7 +12,7 @@ const SKILLS = [
 ] as const;
 
 // ──────────────────────────────────────────────────────────────────────
-// Sprint 16 v0.5 — streaming event types (mirror of hub StreamEvent)
+// Sprint 16 v0.6 — streaming event types (mirroring hub StreamEvent incl. new members)
 // ──────────────────────────────────────────────────────────────────────
 type StreamEvent =
   | { type: "turn_start"; turn_index: number }
@@ -30,6 +30,12 @@ type StreamEvent =
       content: string;
       is_error: boolean;
     }
+  | { type: "file_created"; filename: string; file_type: string }
+  | { type: "file_edited"; filename: string }
+  | { type: "design_commit"; font_type: string; palette: string[]; accent: string; rhythm: string }
+  | { type: "verify_started"; focus_areas?: string[] }
+  | { type: "verify_done"; score: number; verdict: "PASS" | "FAIL" }
+  | { type: "retry_attempt"; attempt: number; max_attempts: number; delay_ms: number }
   | {
       type: "done";
       final_text: string;
@@ -107,6 +113,10 @@ export default function ChatPane({
   const [activeSkill, setActiveSkill] = useState<string | null>(null);
   const [expandedSubtask, setExpandedSubtask] = useState<string | null>(null);
   const [historyLoaded, setHistoryLoaded] = useState(false);
+  // Sprint 16 v0.6 — new semantic event state
+  const [retryState, setRetryState] = useState<{ attempt: number; maxAttempts: number; delayMs: number } | null>(null);
+  const [designCommitEvent, setDesignCommitEvent] = useState<{ fontType: string; palette: string[]; accent: string; rhythm: string } | null>(null);
+  const [verifyState, setVerifyState] = useState<{ score: number; verdict: "PASS" | "FAIL"; isPending: boolean } | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -146,19 +156,15 @@ export default function ChatPane({
   const doneCount = subtasks.filter((t) => t.status === "done").length;
   const runningCount = subtasks.filter((t) => t.status === "running").length;
 
-  // ──────────────────────────────────────────────────────────────────
-  // Sprint 16 v0.5 — streaming send
-  //
-  // Sends `Accept: text/event-stream`, reads the response body as a
-  // ReadableStream, parses one SSE event at a time, dispatches each
-  // event to a state update. Cards appear AS the agent works, not at
-  // the end.
-  // ──────────────────────────────────────────────────────────────────
   async function handleSend() {
     const text = input.trim();
     if (!text || sending) return;
     setInput("");
     setSending(true);
+    // Sprint 16 v0.6 — clear semantic event state on each new send
+    setRetryState(null);
+    setDesignCommitEvent(null);
+    setVerifyState(null);
 
     const userMsg: Message = {
       id: crypto.randomUUID(),
@@ -168,12 +174,6 @@ export default function ChatPane({
     };
     setMessages((prev) => [...prev, userMsg]);
 
-    // Per-stream local state. Maps live for the duration of this send call.
-    //   turnToolMessages: turn_index → id of the "tool" Message that batches
-    //     that turn's tool calls (so multiple tool_use events in one turn
-    //     share one ToolBatch render).
-    //   toolMap: tool_use_id → { msgId, activityIndex } for finding the
-    //     ToolActivity to mutate when its tool_result arrives.
     const turnToolMessages = new Map<number, string>();
     const toolMap = new Map<string, { msgId: string; activityIndex: number }>();
     let streamHadAnyToolCalls = false;
@@ -181,8 +181,8 @@ export default function ChatPane({
     function handleEvent(event: StreamEvent) {
       switch (event.type) {
         case "turn_start": {
-          // No visible change — the agent_text and tool_use events that
-          // follow will create the visible artifacts.
+          // Sprint 16 v0.6 — clear retry indicator on each new turn
+          setRetryState(null);
           return;
         }
 
@@ -203,7 +203,6 @@ export default function ChatPane({
           const existingMsgId = turnToolMessages.get(event.turn_index);
 
           if (existingMsgId) {
-            // Append to the existing tool batch for this turn
             setMessages((prev) =>
               prev.map((m) => {
                 if (m.id !== existingMsgId || m.role !== "tool" || !m.toolActivities) {
@@ -228,7 +227,6 @@ export default function ChatPane({
               }),
             );
           } else {
-            // First tool of this turn — create a new tool batch
             const newMsgId = crypto.randomUUID();
             turnToolMessages.set(event.turn_index, newMsgId);
             toolMap.set(event.tool_use_id, {
@@ -273,9 +271,34 @@ export default function ChatPane({
           return;
         }
 
+        // Sprint 16 v0.6 — new semantic event handlers
+        case "file_created":
+        case "file_edited":
+          // Informational — consumed silently. Future: render file activity row.
+          return;
+
+        case "design_commit":
+          setDesignCommitEvent({
+            fontType: event.font_type,
+            palette: event.palette,
+            accent: event.accent,
+            rhythm: event.rhythm,
+          });
+          return;
+
+        case "verify_started":
+          setVerifyState({ score: 0, verdict: "PASS", isPending: true });
+          return;
+
+        case "verify_done":
+          setVerifyState({ score: event.score, verdict: event.verdict, isPending: false });
+          return;
+
+        case "retry_attempt":
+          setRetryState({ attempt: event.attempt, maxAttempts: event.max_attempts, delayMs: event.delay_ms });
+          return;
+
         case "done": {
-          // Attach total meta (cost, hops, latency) to the most recent agent
-          // text message, mirroring v0.4's footer placement.
           setMessages((prev) => {
             let lastAgentIdx = -1;
             for (let i = prev.length - 1; i >= 0; i--) {
@@ -346,8 +369,6 @@ export default function ChatPane({
         return;
       }
 
-      // Stream reader. SSE events are `data: {...}\n\n` chunks. We accumulate
-      // bytes in `buffer`, then peel off complete events at each `\n\n`.
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
@@ -362,8 +383,6 @@ export default function ChatPane({
           const chunk = buffer.slice(0, boundary);
           buffer = buffer.slice(boundary + 2);
 
-          // Each event chunk may have multiple lines. We only consume the
-          // first `data: ` line — the hub emits one JSON payload per event.
           const dataLine = chunk.split("\n").find((l) => l.startsWith("data: "));
           if (!dataLine) continue;
           const json = dataLine.slice(6);
@@ -380,8 +399,6 @@ export default function ChatPane({
         }
       }
 
-      // Flush any trailing complete event in the buffer (rare but possible
-      // when the stream ends without a final \n\n separator).
       if (buffer.trim().length > 0) {
         const dataLine = buffer.split("\n").find((l) => l.startsWith("data: "));
         if (dataLine) {
@@ -478,6 +495,14 @@ export default function ChatPane({
               ${totalCost.toFixed(3)}
             </span>
           )}
+          {/* Sprint 16 v0.6 — RetryIndicator in the header bar */}
+          {retryState && (
+            <RetryIndicator
+              attempt={retryState.attempt}
+              maxAttempts={retryState.maxAttempts}
+              delayMs={retryState.delayMs}
+            />
+          )}
         </button>
       </div>
 
@@ -551,6 +576,23 @@ export default function ChatPane({
           if (msg.role === "tool") return <ToolBatch key={msg.id} msg={msg} />;
           return <MessageBubble key={msg.id} msg={msg} />;
         })}
+        {/* Sprint 16 v0.6 — DesignCommitCard appears after messages when tokens were updated */}
+        {designCommitEvent && (
+          <DesignCommitCard
+            fontType={designCommitEvent.fontType}
+            palette={designCommitEvent.palette}
+            accent={designCommitEvent.accent}
+            rhythm={designCommitEvent.rhythm}
+          />
+        )}
+        {/* Sprint 16 v0.6 — VerifyCard appears after messages when critique is running/done */}
+        {verifyState && (
+          <VerifyCard
+            score={verifyState.score}
+            verdict={verifyState.verdict}
+            isPending={verifyState.isPending}
+          />
+        )}
         {sending && (
           <div
             style={{
@@ -695,6 +737,315 @@ export default function ChatPane({
           {sending ? "…" : "Send"}
         </button>
       </div>
+    </div>
+  );
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Sprint 16 v0.6 — new card components
+// All use inline styles + CSS vars to match the existing file pattern.
+// ──────────────────────────────────────────────────────────────────────
+
+function DesignCommitCard({
+  fontType,
+  palette,
+  accent,
+  rhythm,
+}: {
+  fontType: string;
+  palette: string[];
+  accent: string;
+  rhythm: string;
+}) {
+  return (
+    <div
+      style={{
+        border: "1px solid var(--design-border)",
+        borderRadius: 8,
+        padding: "10px 12px",
+        fontSize: 12,
+        background: "var(--design-paper)",
+        display: "flex",
+        flexDirection: "column",
+        gap: 6,
+      }}
+    >
+      <div
+        style={{
+          fontSize: 9,
+          fontWeight: 600,
+          color: "var(--design-ink3)",
+          textTransform: "uppercase",
+          letterSpacing: "0.06em",
+        }}
+      >
+        Design commit
+      </div>
+      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        <span style={{ color: "var(--design-ink3)", width: 56, flexShrink: 0, fontSize: 11 }}>Type</span>
+        <span style={{ color: "var(--design-ink)", fontWeight: 500 }}>{fontType}</span>
+      </div>
+      <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
+        <span style={{ color: "var(--design-ink3)", width: 56, flexShrink: 0, fontSize: 11, paddingTop: 2 }}>Palette</span>
+        <div style={{ display: "flex", gap: 5, alignItems: "center", flexWrap: "wrap" }}>
+          {palette.map((hex, i) => (
+            <span key={i} style={{ display: "flex", alignItems: "center", gap: 3 }}>
+              <span
+                style={{
+                  width: 10,
+                  height: 10,
+                  borderRadius: 2,
+                  background: hex,
+                  display: "inline-block",
+                  border: "1px solid var(--design-border)",
+                  flexShrink: 0,
+                }}
+              />
+              <span
+                style={{
+                  fontFamily: "ui-monospace, 'JetBrains Mono', Menlo, monospace",
+                  fontSize: 10,
+                  color: "var(--design-ink2)",
+                }}
+              >
+                {hex}
+              </span>
+            </span>
+          ))}
+        </div>
+      </div>
+      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        <span style={{ color: "var(--design-ink3)", width: 56, flexShrink: 0, fontSize: 11 }}>Accent</span>
+        <span style={{ display: "flex", alignItems: "center", gap: 3 }}>
+          <span
+            style={{
+              width: 10,
+              height: 10,
+              borderRadius: 2,
+              background: accent,
+              display: "inline-block",
+              border: "1px solid var(--design-border)",
+            }}
+          />
+          <span
+            style={{
+              fontFamily: "ui-monospace, 'JetBrains Mono', Menlo, monospace",
+              fontSize: 10,
+              color: "var(--design-ink2)",
+            }}
+          >
+            {accent}
+          </span>
+        </span>
+      </div>
+      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        <span style={{ color: "var(--design-ink3)", width: 56, flexShrink: 0, fontSize: 11 }}>Rhythm</span>
+        <span style={{ color: "var(--design-ink2)", fontSize: 11 }}>{rhythm}</span>
+      </div>
+    </div>
+  );
+}
+
+function VerifyCard({
+  score,
+  verdict,
+  isPending,
+}: {
+  score: number;
+  verdict: "PASS" | "FAIL";
+  isPending: boolean;
+}) {
+  const isPass = verdict === "PASS";
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 8,
+        padding: "7px 10px",
+        borderRadius: 8,
+        border: "1px solid var(--design-border)",
+        background: "var(--design-paper)",
+        fontSize: 12,
+      }}
+    >
+      <span style={{ color: "#eab308", fontSize: 11, flexShrink: 0 }}>⚡</span>
+      <span style={{ color: "var(--design-ink2)", flex: 1 }}>
+        {isPending ? "Verifying…" : "Verify"}
+      </span>
+      {!isPending && (
+        <>
+          <span
+            style={{
+              padding: "2px 8px",
+              borderRadius: 999,
+              fontSize: 10,
+              fontWeight: 600,
+              background: isPass ? "#dcfce7" : "#fee2e2",
+              color: isPass ? "#166534" : "#991b1b",
+            }}
+          >
+            {verdict}
+          </span>
+          <span
+            style={{
+              color: "var(--design-ink3)",
+              fontFamily: "ui-monospace, 'JetBrains Mono', Menlo, monospace",
+              fontSize: 10,
+            }}
+          >
+            ({score}/100)
+          </span>
+        </>
+      )}
+    </div>
+  );
+}
+
+function RetryIndicator({
+  attempt,
+  maxAttempts,
+  delayMs,
+}: {
+  attempt: number;
+  maxAttempts: number;
+  delayMs: number;
+}) {
+  return (
+    <span
+      style={{
+        fontSize: 10,
+        padding: "2px 8px",
+        borderRadius: 999,
+        background: "rgba(234, 179, 8, 0.15)",
+        color: "#a16207",
+        fontWeight: 500,
+        flexShrink: 0,
+        marginLeft: 6,
+      }}
+    >
+      Retrying… {attempt}/{maxAttempts} in {delayMs / 1000}s
+    </span>
+  );
+}
+
+function verbFromToolName(toolName: string): string {
+  const map: Record<string, string> = {
+    regenerate_section: "Regenerating",
+    add_section: "Adding",
+    remove_section: "Removing",
+    update_design_tokens: "Updating tokens",
+    save_iteration: "Saving",
+    critique: "Verifying",
+    assemble_html: "Assembling",
+    apply_token_to_html: "Applying tokens",
+  };
+  return map[toolName] ?? toolName;
+}
+
+function GroupedActionCard({
+  verb,
+  items,
+  isExpanded,
+  onToggle,
+}: {
+  verb: string;
+  items: string[];
+  isExpanded: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <div
+      onClick={onToggle}
+      style={{
+        display: "flex",
+        alignItems: "flex-start",
+        gap: 6,
+        padding: "6px 10px",
+        borderRadius: 6,
+        background: "var(--design-bg2)",
+        cursor: "pointer",
+        fontSize: 12,
+        border: "1px solid var(--design-border)",
+      }}
+    >
+      <span style={{ color: "#eab308", fontSize: 11, flexShrink: 0, marginTop: 1 }}>⚡</span>
+      <span style={{ flex: 1, color: "var(--design-ink2)", minWidth: 0 }}>
+        {verb}: {items[0]}
+        {items.length > 1 && !isExpanded && (
+          <span style={{ color: "var(--design-ink3)" }}>, +{items.length - 1} more</span>
+        )}
+        {isExpanded &&
+          items.slice(1).map((item, i) => (
+            <div
+              key={i}
+              style={{
+                paddingLeft: 12,
+                color: "var(--design-ink3)",
+                fontFamily: "ui-monospace, 'JetBrains Mono', Menlo, monospace",
+                fontSize: 11,
+              }}
+            >
+              {item}
+            </div>
+          ))}
+      </span>
+      <span style={{ color: "var(--design-ink3)", fontSize: 9, flexShrink: 0 }}>
+        {isExpanded ? "▾" : "▸"}
+      </span>
+    </div>
+  );
+}
+
+function AggregatedActionCard({
+  verb,
+  count,
+  filenames,
+  isExpanded,
+  onToggle,
+}: {
+  verb: string;
+  count: number;
+  filenames: string[];
+  isExpanded: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <div
+      onClick={onToggle}
+      style={{
+        display: "flex",
+        alignItems: "flex-start",
+        gap: 6,
+        padding: "6px 10px",
+        borderRadius: 6,
+        background: "var(--design-bg2)",
+        cursor: "pointer",
+        fontSize: 12,
+        border: "1px solid var(--design-border)",
+      }}
+    >
+      <span style={{ color: "#eab308", fontSize: 11, flexShrink: 0, marginTop: 1 }}>⚡</span>
+      <span style={{ flex: 1, color: "var(--design-ink2)" }}>
+        {verb} ×{count}, Done
+        {isExpanded &&
+          filenames.map((f, i) => (
+            <div
+              key={i}
+              style={{
+                paddingLeft: 12,
+                color: "var(--design-ink3)",
+                fontFamily: "ui-monospace, 'JetBrains Mono', Menlo, monospace",
+                fontSize: 11,
+              }}
+            >
+              {f}
+            </div>
+          ))}
+      </span>
+      <span style={{ color: "var(--design-ink3)", fontSize: 9, flexShrink: 0 }}>
+        {isExpanded ? "▾" : "▸"}
+      </span>
     </div>
   );
 }
@@ -1130,10 +1481,40 @@ function MessageBubble({ msg }: { msg: Message }) {
 
 // ──────────────────────────────────────────────────────────────────────
 // Sprint 16 v0.4 — ToolBatch + ToolCard (preserved)
+// Sprint 16 v0.6 — ToolBatch now groups consecutive same-verb activities
 // ──────────────────────────────────────────────────────────────────────
 
 function ToolBatch({ msg }: { msg: Message }) {
+  const [expandedGroups, setExpandedGroups] = useState<Map<string, boolean>>(new Map());
   if (!msg.toolActivities || msg.toolActivities.length === 0) return null;
+
+  // Sprint 16 v0.6 — group consecutive activities sharing the same verb.
+  // 3+ in a group → AggregatedActionCard. 2 → GroupedActionCard. 1 → ToolCard.
+  type Group = {
+    verb: string;
+    activities: ToolActivity[];
+    key: string; // first toolUseId in the group
+  };
+
+  const groups: Group[] = [];
+  for (const activity of msg.toolActivities) {
+    const verb = verbFromToolName(activity.toolName);
+    const last = groups[groups.length - 1];
+    if (last && last.verb === verb) {
+      last.activities.push(activity);
+    } else {
+      groups.push({ verb, activities: [activity], key: activity.toolUseId });
+    }
+  }
+
+  const toggleGroup = (key: string) => {
+    setExpandedGroups((prev) => {
+      const next = new Map(prev);
+      next.set(key, !prev.get(key));
+      return next;
+    });
+  };
+
   return (
     <div
       style={{
@@ -1170,9 +1551,35 @@ function ToolBatch({ msg }: { msg: Message }) {
           minWidth: 0,
         }}
       >
-        {msg.toolActivities.map((ta) => (
-          <ToolCard key={ta.toolUseId} activity={ta} />
-        ))}
+        {groups.map((group) => {
+          const isExpanded = !!expandedGroups.get(group.key);
+          const { verb, activities, key } = group;
+          if (activities.length >= 3) {
+            return (
+              <AggregatedActionCard
+                key={key}
+                verb={verb}
+                count={activities.length}
+                filenames={activities.map((a) => a.toolName)}
+                isExpanded={isExpanded}
+                onToggle={() => toggleGroup(key)}
+              />
+            );
+          }
+          if (activities.length === 2) {
+            return (
+              <GroupedActionCard
+                key={key}
+                verb={verb}
+                items={activities.map((a) => a.toolName)}
+                isExpanded={isExpanded}
+                onToggle={() => toggleGroup(key)}
+              />
+            );
+          }
+          // Single activity — render the existing ToolCard
+          return <ToolCard key={activities[0].toolUseId} activity={activities[0]} />;
+        })}
       </div>
     </div>
   );
@@ -1247,8 +1654,6 @@ function ToolCard({ activity }: { activity: ToolActivity }) {
             fontSize: 10,
             fontWeight: 700,
             flexShrink: 0,
-            // v0.5 — soft pulse while pending so the user sees it's alive,
-            // not stalled. The pulse stops when the result arrives.
             animation: isPending ? "designPulse 1.4s ease-in-out infinite" : undefined,
           }}
         >
