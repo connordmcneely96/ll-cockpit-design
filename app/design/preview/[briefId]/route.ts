@@ -146,9 +146,11 @@ export async function GET(
 
   try {
     const env = getCloudflareContext().env as unknown as Env;
+    const editMode = url.searchParams.get("edit") === "1";
 
     let iterationNumber: number | null = null;
     let viaToken = false;
+    let isOwnerView = false;
 
     if (tokenParam) {
       const shareRow = await validateShareToken(briefId, tokenParam, env);
@@ -158,14 +160,34 @@ export async function GET(
     } else {
       // Cookie auth fallback — owner viewing their own preview
       if (!(await isOwnerViaCookie(briefId, env))) return notFound();
+      isOwnerView = true;
     }
 
-    const html = await fetchIterationHtml(briefId, iterationNumber, env);
+    let html = await fetchIterationHtml(briefId, iterationNumber, env);
     if (!html) return notFound();
 
     if (viaToken && tokenParam) {
       // Fire-and-forget view tracking; don't await blocking response
       recordView(tokenParam, env).catch((e) => console.error("recordView", e));
+    }
+
+    if (isOwnerView && editMode) {
+      const bridge =
+        `<style>[data-nexus-id]:hover{outline:2px solid #00d4ff;outline-offset:-2px;cursor:pointer;}</style>` +
+        `<script>(function(){` +
+        `if(window.parent===window)return;` +
+        `document.addEventListener('click',function(e){` +
+        `var el=e.target.closest('[data-nexus-id]');` +
+        `if(!el)return;` +
+        `window.parent.postMessage({source:'nexus-preview',type:'section-click',sectionId:el.getAttribute('data-nexus-id')},'*');` +
+        `});` +
+        `})();<` + `/script>`;
+      const idx = html.lastIndexOf("</body>");
+      if (idx !== -1) {
+        html = html.slice(0, idx) + bridge + html.slice(idx);
+      } else {
+        html = html + bridge;
+      }
     }
 
     return new Response(html, {
