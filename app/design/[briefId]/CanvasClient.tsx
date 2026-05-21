@@ -25,6 +25,10 @@ export default function CanvasClient({ briefId, detail: initialDetail, token }: 
   const [files, setFiles] = useState<DesignFile[]>([]);
   const [shareOpen, setShareOpen] = useState(false);
   const [filesRefreshKey, setFilesRefreshKey] = useState(0);
+  const [rightView, setRightView] = useState<'preview' | 'code'>(
+    initialDetail.brief.status === 'building' ? 'code' : 'preview'
+  );
+  const [selectedSection, setSelectedSection] = useState<string | null>(null);
 
   // Sprint 18G — auto-resume state
   const [resumeBanner, setResumeBanner] = useState<null | {
@@ -162,6 +166,18 @@ export default function CanvasClient({ briefId, detail: initialDetail, token }: 
     };
   }, [briefId, brief.status]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  useEffect(() => {
+    function handler(event: MessageEvent) {
+      if (event.origin !== window.location.origin) return;
+      if (event.data?.source !== 'nexus-preview') return;
+      if (event.data?.type === 'section-click') {
+        setSelectedSection(event.data.sectionId as string);
+      }
+    }
+    window.addEventListener('message', handler);
+    return () => window.removeEventListener('message', handler);
+  }, []);
+
   const progress =
     run && run.subtasks_total > 0
       ? Math.round((run.subtasks_done / run.subtasks_total) * 100)
@@ -228,6 +244,26 @@ export default function CanvasClient({ briefId, detail: initialDetail, token }: 
         <StatusBadge status={brief.status} progress={progress} />
 
         <div style={{ flex: 1 }} />
+
+        {selectedSection && (
+          <span
+            style={{
+              fontSize: 11,
+              fontWeight: 500,
+              color: '#0e4f6e',
+              background: '#e0f5ff',
+              borderRadius: 999,
+              padding: '2px 8px',
+              flexShrink: 0,
+              maxWidth: 200,
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+            }}
+          >
+            Selected: {selectedSection}
+          </span>
+        )}
 
         {brief.current_iteration && brief.current_iteration > 1 && (
           <span style={{ fontSize: 12, color: "var(--design-ink3)" }}>
@@ -341,34 +377,85 @@ export default function CanvasClient({ briefId, detail: initialDetail, token }: 
           />
         </div>
 
-        <div style={{ flex: 1, display: "flex", overflow: "hidden" }}>
+        <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
+          {/* Tab bar */}
           <div
             style={{
-              width: 200,
-              borderRight: "1px solid var(--design-border)",
-              overflow: "hidden",
               display: "flex",
-              flexDirection: "column",
+              borderBottom: "1px solid var(--design-border)",
               flexShrink: 0,
+              background: "var(--design-bg)",
             }}
           >
-            <FileTree
-              briefId={briefId}
-              selectedFile={selectedFile}
-              onSelectFile={setSelectedFile}
-              onFilesLoaded={setFiles}
-              refreshKey={filesRefreshKey}
-            />
+            {(['preview', 'code'] as const).map((view) => (
+              <button
+                key={view}
+                onClick={() => setRightView(view)}
+                style={{
+                  background: "none",
+                  border: "none",
+                  borderBottom: rightView === view ? "2px solid var(--design-terracotta)" : "2px solid transparent",
+                  cursor: "pointer",
+                  padding: "8px 16px",
+                  fontSize: 12,
+                  fontWeight: rightView === view ? 600 : 400,
+                  color: rightView === view ? "var(--design-ink)" : "var(--design-ink3)",
+                  marginBottom: -1,
+                }}
+              >
+                {view === 'preview' ? 'Preview' : 'Code'}
+              </button>
+            ))}
           </div>
 
-          <div style={{ flex: 1, overflow: "hidden", display: "flex", flexDirection: "column" }}>
-            <CodeViewer
-              briefId={briefId}
-              files={files}
-              selectedFile={selectedFile}
-              briefStatus={brief.status}
-              refreshKey={filesRefreshKey}
-            />
+          {/* Content */}
+          <div style={{ flex: 1, overflow: "hidden", display: "flex" }}>
+            {rightView === 'preview' ? (
+              <iframe
+                key={filesRefreshKey}
+                src={`/design/preview/${briefId}?edit=1`}
+                title="Design preview"
+                style={{
+                  flex: 1,
+                  border: "none",
+                  background: "white",
+                  width: "100%",
+                  height: "100%",
+                  display: "block",
+                }}
+              />
+            ) : (
+              <>
+                <div
+                  style={{
+                    width: 200,
+                    borderRight: "1px solid var(--design-border)",
+                    overflow: "hidden",
+                    display: "flex",
+                    flexDirection: "column",
+                    flexShrink: 0,
+                  }}
+                >
+                  <FileTree
+                    briefId={briefId}
+                    selectedFile={selectedFile}
+                    onSelectFile={setSelectedFile}
+                    onFilesLoaded={setFiles}
+                    refreshKey={filesRefreshKey}
+                  />
+                </div>
+
+                <div style={{ flex: 1, overflow: "hidden", display: "flex", flexDirection: "column" }}>
+                  <CodeViewer
+                    briefId={briefId}
+                    files={files}
+                    selectedFile={selectedFile}
+                    briefStatus={brief.status}
+                    refreshKey={filesRefreshKey}
+                  />
+                </div>
+              </>
+            )}
           </div>
         </div>
       </div>
