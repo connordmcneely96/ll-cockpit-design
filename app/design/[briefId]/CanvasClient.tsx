@@ -6,6 +6,7 @@ import ChatPane from "./ChatPane";
 import FileTree, { type DesignFile } from "./FileTree";
 import CodeViewer from "./CodeViewer";
 import ShareModal from "./ShareModal";
+import SectionInspector from "./SectionInspector";
 import type { BriefDetail, Brief, Subtask } from "./page";
 
 type Props = {
@@ -409,7 +410,13 @@ export default function CanvasClient({ briefId, detail: initialDetail, token }: 
           </div>
 
           {/* Content */}
-          <div style={{ flex: 1, overflow: "hidden", display: "flex" }}>
+          <div style={{ flex: 1, overflow: "hidden", display: "flex", position: "relative" }}>
+            <SectionInspector
+              briefId={briefId}
+              selectedSection={selectedSection}
+              onClose={() => setSelectedSection(null)}
+              onApplied={handleChatReply}
+            />
             {rightView === 'preview' ? (
               <iframe
                 key={filesRefreshKey}
