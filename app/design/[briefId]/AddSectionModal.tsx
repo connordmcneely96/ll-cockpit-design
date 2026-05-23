@@ -4,6 +4,7 @@ import { useState, useEffect } from "react"
 
 type SectionType = {
   id: string
+  slug: string
   name: string
   description: string
   category: string
@@ -44,7 +45,7 @@ export default function AddSectionModal({ briefId, open, onClose, onAdded }: Pro
 
   async function handleSelect(st: SectionType) {
     onClose()
-    const message = `Use the add_section tool with name="${st.name}" and description="${st.description}". After adding, call save_iteration to commit the change. Do not modify any existing sections.`
+    const message = `Use the add_section tool with name="${st.name}", section_type_slug="${st.slug}", and description="${st.description}". After adding, call save_iteration to commit the change. Do not modify any existing sections.`
     try {
       const res = await fetch(`/api/design/briefs/${briefId}/chat`, {
         method: 'POST',
