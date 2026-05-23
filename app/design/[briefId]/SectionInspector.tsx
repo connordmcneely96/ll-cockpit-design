@@ -20,7 +20,7 @@ export default function SectionInspector({ briefId, selectedSection, onClose, on
   async function handleApply() {
     if (!instruction.trim() || inflight) return;
 
-    const message = `In the section with data-nexus-id="${selectedSection}", apply this change: ${instruction.trim()}. Modify ONLY that section; leave all other sections of the page unchanged.`;
+    const message = `Use the regenerate_section tool with section_slug="${selectedSection}" and refinement="${instruction.trim()}". After regenerating, call save_iteration to commit the change. Apply the refinement to the "${selectedSection}" section only — do not touch any other section.`;
 
     setInflight(true);
     setErrorMsg(null);
