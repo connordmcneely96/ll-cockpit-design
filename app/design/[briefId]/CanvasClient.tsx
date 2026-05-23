@@ -7,6 +7,8 @@ import FileTree, { type DesignFile } from "./FileTree";
 import CodeViewer from "./CodeViewer";
 import ShareModal from "./ShareModal";
 import SectionInspector from "./SectionInspector";
+import SectionTree from "./SectionTree";
+import AddSectionModal from "./AddSectionModal";
 import type { BriefDetail, Brief, Subtask } from "./page";
 
 type Props = {
@@ -30,6 +32,8 @@ export default function CanvasClient({ briefId, detail: initialDetail, token }: 
     initialDetail.brief.status === 'building' ? 'code' : 'preview'
   );
   const [selectedSection, setSelectedSection] = useState<string | null>(null);
+  const [leftTab, setLeftTab] = useState<'chat' | 'sections'>('chat');
+  const [addSectionOpen, setAddSectionOpen] = useState(false);
 
   // Sprint 18G — auto-resume state
   const [resumeBanner, setResumeBanner] = useState<null | {
@@ -368,14 +372,53 @@ export default function CanvasClient({ briefId, detail: initialDetail, token }: 
             overflow: "hidden",
           }}
         >
-          <ChatPane
-            briefId={briefId}
-            brief={brief}
-            subtasks={subtasks}
-            run={run ?? null}
-            token={token}
-            onChatReply={handleChatReply}
-          />
+          {/* Left pane tab bar */}
+          <div
+            style={{
+              display: "flex",
+              borderBottom: "1px solid var(--design-border)",
+              flexShrink: 0,
+              background: "var(--design-bg)",
+            }}
+          >
+            {(['chat', 'sections'] as const).map((tab) => (
+              <button
+                key={tab}
+                onClick={() => setLeftTab(tab)}
+                style={{
+                  background: "none",
+                  border: "none",
+                  borderBottom: leftTab === tab ? "2px solid var(--design-terracotta)" : "2px solid transparent",
+                  cursor: "pointer",
+                  padding: "8px 16px",
+                  fontSize: 12,
+                  fontWeight: leftTab === tab ? 600 : 400,
+                  color: leftTab === tab ? "var(--design-ink)" : "var(--design-ink3)",
+                  marginBottom: -1,
+                }}
+              >
+                {tab === 'chat' ? 'Chat' : 'Sections'}
+              </button>
+            ))}
+          </div>
+
+          {leftTab === 'chat' ? (
+            <ChatPane
+              briefId={briefId}
+              brief={brief}
+              subtasks={subtasks}
+              run={run ?? null}
+              token={token}
+              onChatReply={handleChatReply}
+            />
+          ) : (
+            <SectionTree
+              briefId={briefId}
+              subtasks={subtasks}
+              onSectionAction={handleChatReply}
+              onOpenAdd={() => setAddSectionOpen(true)}
+            />
+          )}
         </div>
 
         <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
@@ -468,6 +511,12 @@ export default function CanvasClient({ briefId, detail: initialDetail, token }: 
       </div>
 
       <ShareModal briefId={briefId} open={shareOpen} onClose={() => setShareOpen(false)} />
+      <AddSectionModal
+        briefId={briefId}
+        open={addSectionOpen}
+        onClose={() => setAddSectionOpen(false)}
+        onAdded={handleChatReply}
+      />
     </div>
   );
 }
