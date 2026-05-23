@@ -2,6 +2,7 @@
 
 import { useState, useEffect, type FormEvent } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
+import TemplatePicker, { type PageTemplate } from "./TemplatePicker";
 
 const SKILLS = [
   { id: "hi_fi_design", label: "Hi-fi design", hint: "Production-ready visual fidelity" },
@@ -54,6 +55,10 @@ export default function IntakeClient() {
   const [attachedSystem, setAttachedSystem] = useState<AttachedSystem | null>(null);
   const [systemLoading, setSystemLoading] = useState(!!systemSlug);
 
+  // Sprint 119D — template picker step
+  const [templateStep, setTemplateStep] = useState(true);
+  const [selectedTemplate, setSelectedTemplate] = useState<PageTemplate | null>(null);
+
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -93,6 +98,12 @@ export default function IntakeClient() {
     : projectType === "from-template" ? "project from template"
     : projectType === "other" ? "project"
     : "prototype";
+
+  function handleTemplateSelect(template: PageTemplate) {
+    setSelectedTemplate(template);
+    setTemplateStep(false);
+    setMustHaveSections(template.sections_json.join(",\n"));
+  }
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
@@ -156,6 +167,15 @@ export default function IntakeClient() {
     }
   }
 
+  if (templateStep) {
+    return (
+      <TemplatePicker
+        onSelect={handleTemplateSelect}
+        onSkip={() => setTemplateStep(false)}
+      />
+    );
+  }
+
   return (
     <div
       style={{
@@ -216,6 +236,45 @@ export default function IntakeClient() {
           padding: "32px 24px 80px",
         }}
       >
+        {/* Sprint 119D — selected template banner */}
+        {selectedTemplate && (
+          <div
+            style={{
+              border: "1px solid var(--design-border)",
+              background: "var(--design-bg2)",
+              borderRadius: 8,
+              padding: "10px 14px",
+              marginBottom: 16,
+              display: "flex",
+              alignItems: "center",
+              gap: 10,
+            }}
+          >
+            <span style={{ fontSize: 13, color: "var(--design-ink)", flex: 1 }}>
+              Template: <strong>{selectedTemplate.name}</strong>
+            </span>
+            <button
+              type="button"
+              onClick={() => {
+                setMustHaveSections("");
+                setSelectedTemplate(null);
+              }}
+              style={{
+                background: "none",
+                border: "none",
+                color: "var(--design-ink3)",
+                fontSize: 16,
+                cursor: "pointer",
+                padding: "0 4px",
+                lineHeight: 1,
+              }}
+              title="Clear template"
+            >
+              ×
+            </button>
+          </div>
+        )}
+
         {/* Sprint 18E — attached design system banner */}
         {systemSlug && (
           <div
