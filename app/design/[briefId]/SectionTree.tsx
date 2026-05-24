@@ -1,6 +1,6 @@
 "use client"
 
-import { useState } from "react"
+import { useState, useEffect, useCallback } from "react"
 import type { Subtask } from "./page"
 
 function slugFromTitle(title: string): { name: string; slug: string } {
@@ -14,6 +14,8 @@ function slugFromTitle(title: string): { name: string; slug: string } {
     .replace(/^_+|_+$/g, '')
   return { name, slug }
 }
+
+type IndexSection = { slug: string; name: string; sort_order: number; subtask_short_id: string }
 
 type Props = {
   briefId: string
@@ -30,10 +32,31 @@ export default function SectionTree({ briefId, subtasks, onSectionAction, onOpen
   const [draggingSlug, setDraggingSlug] = useState<string | null>(null)
   const [dragOverSlug, setDragOverSlug] = useState<string | null>(null)
   const [dragOverPosition, setDragOverPosition] = useState<'above' | 'below' | null>(null)
+  const [indexSections, setIndexSections] = useState<IndexSection[] | null>(null)
 
-  const sections = subtasks
+  // Fallback: derive from subtasks (short_id order) for first paint or if GET fails
+  const subtaskSections = subtasks
     .filter(s => s.agent === 'composer' && s.status === 'done')
     .map(s => slugFromTitle(s.title))
+
+  // Authoritative list from sort_order index; falls back to subtask-derived list
+  const sections: { slug: string; name: string }[] = indexSections ?? subtaskSections
+
+  const fetchSections = useCallback(async () => {
+    try {
+      const res = await fetch(`/api/design/briefs/${briefId}/sections`)
+      if (!res.ok) return
+      const data = await res.json() as { sections: IndexSection[] }
+      if (Array.isArray(data.sections)) setIndexSections(data.sections)
+    } catch {
+      // silently fall back to subtask-derived list
+    }
+  }, [briefId])
+
+  // Fetch on mount and whenever a section is added/removed (subtask count changes)
+  useEffect(() => {
+    fetchSections()
+  }, [fetchSections, subtasks.length])
 
   async function handleRemove(slug: string) {
     setRemovingSlug(slug)
@@ -49,6 +72,7 @@ export default function SectionTree({ briefId, subtasks, onSectionAction, onOpen
         body: JSON.stringify({ message }),
       })
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      await fetchSections()
       onSectionAction()
     } catch (err) {
       setRowErrors(prev => ({
@@ -101,15 +125,16 @@ export default function SectionTree({ briefId, subtasks, onSectionAction, onOpen
     newOrder.splice(insertAt, 0, fromSlug)
 
     setReordering(true)
-    const message = `Use the reorder_sections tool with ordered_slugs=${JSON.stringify(newOrder)}. After reordering, call save_iteration to commit the change. Do not modify the content of any section.`
 
     try {
-      const res = await fetch(`/api/design/briefs/${briefId}/chat`, {
+      const res = await fetch(`/api/design/briefs/${briefId}/sections/reorder`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message }),
+        body: JSON.stringify({ ordered_slugs: newOrder }),
       })
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const data = await res.json() as { ok: boolean; sections?: IndexSection[] }
+      if (data.sections) setIndexSections(data.sections)
       onSectionAction()
     } catch (err) {
       setRowErrors({ ...rowErrors, [fromSlug]: err instanceof Error ? err.message : 'Reorder failed' })
