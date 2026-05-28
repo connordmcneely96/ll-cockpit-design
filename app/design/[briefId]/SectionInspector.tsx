@@ -5,15 +5,17 @@ import { useState, useEffect, useCallback } from "react";
 type BlockSettingDef = { id: string; label?: string; default?: unknown };
 type BlockDef = { type: string; name?: string; limit?: number; settings?: BlockSettingDef[] };
 type BlockRow = { id: string; block_type: string; sort_order: number; settings_json: string | null };
+type SchemeRow = { id: string; name: string; palette_json: string; sort_order: number; is_preset: number };
 
 type Props = {
   briefId: string;
   selectedSection: string | null;
+  sectionSchemeId?: string | null;
   onClose: () => void;
   onApplied: () => void;
 };
 
-export default function SectionInspector({ briefId, selectedSection, onClose, onApplied }: Props) {
+export default function SectionInspector({ briefId, selectedSection, sectionSchemeId, onClose, onApplied }: Props) {
   const [instruction, setInstruction] = useState("");
   const [inflight, setInflight] = useState(false);
   const [appliedMsg, setAppliedMsg] = useState<string | null>(null);
@@ -22,6 +24,45 @@ export default function SectionInspector({ briefId, selectedSection, onClose, on
   const [blocks, setBlocks] = useState<BlockRow[]>([]);
   const [blockDefs, setBlockDefs] = useState<BlockDef[]>([]);
   const [blockInflight, setBlockInflight] = useState<string | null>(null);
+
+  const [schemes, setSchemes] = useState<SchemeRow[]>([]);
+  const [activeSchemeId, setActiveSchemeId] = useState<string | null>(sectionSchemeId ?? null);
+
+  const fetchSchemes = useCallback(async () => {
+    try {
+      const res = await fetch(`/api/design/briefs/${briefId}/schemes`);
+      if (!res.ok) return;
+      const data = await res.json() as { schemes: SchemeRow[] };
+      setSchemes(data.schemes ?? []);
+    } catch {
+      // silently ignore
+    }
+  }, [briefId]);
+
+  useEffect(() => {
+    fetchSchemes();
+  }, [fetchSchemes]);
+
+  useEffect(() => {
+    setActiveSchemeId(sectionSchemeId ?? null);
+  }, [sectionSchemeId, selectedSection]);
+
+  async function handleSchemeClick(schemeId: string | null) {
+    if (!selectedSection) return;
+    try {
+      const res = await fetch(
+        `/api/design/briefs/${briefId}/sections/${selectedSection}/scheme`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ scheme_id: schemeId }),
+        },
+      );
+      if (res.ok) setActiveSchemeId(schemeId);
+    } catch {
+      // silently ignore
+    }
+  }
 
   const fetchBlocks = useCallback(async () => {
     if (!selectedSection) return;
@@ -193,6 +234,102 @@ export default function SectionInspector({ briefId, selectedSection, onClose, on
           gap: 10,
         }}
       >
+        {schemes.length > 0 && (
+          <div
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              gap: 6,
+              paddingBottom: 10,
+              borderBottom: "1px solid var(--design-border)",
+            }}
+          >
+            <span style={{ fontSize: 11, fontWeight: 600, color: "var(--design-ink3)", textTransform: "uppercase", letterSpacing: "0.05em" }}>
+              Color Scheme
+            </span>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+              {/* None option */}
+              <button
+                onClick={() => handleSchemeClick(null)}
+                title="None"
+                style={{
+                  display: "flex",
+                  flexDirection: "column",
+                  alignItems: "center",
+                  gap: 3,
+                  background: "none",
+                  border: "none",
+                  cursor: "pointer",
+                  padding: 0,
+                }}
+              >
+                <div
+                  style={{
+                    width: 32,
+                    height: 32,
+                    borderRadius: "50%",
+                    border: activeSchemeId === null
+                      ? "2px solid var(--design-terracotta)"
+                      : "2px solid var(--design-border)",
+                    background: "var(--design-bg)",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    boxSizing: "border-box",
+                    color: "var(--design-ink3)",
+                    fontSize: 16,
+                    lineHeight: 1,
+                  }}
+                >
+                  ∅
+                </div>
+                <span style={{ fontSize: 10, color: "var(--design-ink3)" }}>None</span>
+              </button>
+
+              {schemes.map((scheme) => {
+                let palette: { accent?: string } = {};
+                try { palette = JSON.parse(scheme.palette_json); } catch { /* ignore */ }
+                const isActive = activeSchemeId === scheme.id;
+                return (
+                  <button
+                    key={scheme.id}
+                    onClick={() => handleSchemeClick(scheme.id)}
+                    title={scheme.name}
+                    style={{
+                      display: "flex",
+                      flexDirection: "column",
+                      alignItems: "center",
+                      gap: 3,
+                      background: "none",
+                      border: "none",
+                      cursor: "pointer",
+                      padding: 0,
+                    }}
+                  >
+                    <div
+                      style={{
+                        width: 32,
+                        height: 32,
+                        borderRadius: "50%",
+                        background: palette.accent ?? "#ccc",
+                        border: isActive
+                          ? "2px solid var(--design-terracotta)"
+                          : "2px solid var(--design-border)",
+                        boxSizing: "border-box",
+                        outline: isActive ? "2px solid var(--design-terracotta)" : "none",
+                        outlineOffset: 2,
+                      }}
+                    />
+                    <span style={{ fontSize: 10, color: "var(--design-ink3)", maxWidth: 40, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {scheme.name}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
         <p style={{ margin: 0, fontSize: 12, color: "var(--design-ink3)", lineHeight: 1.5 }}>
           Describe the change you want for this section. It&apos;ll apply only to this section.
         </p>
