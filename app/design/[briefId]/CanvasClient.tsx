@@ -6,6 +6,7 @@ import ChatPane from "./ChatPane";
 import FileTree, { type DesignFile } from "./FileTree";
 import CodeViewer from "./CodeViewer";
 import ShareModal from "./ShareModal";
+import DeployButton from "./DeployButton";
 import SectionInspector from "./SectionInspector";
 import SectionTree from "./SectionTree";
 import AddSectionModal from "./AddSectionModal";
@@ -274,6 +275,10 @@ export default function CanvasClient({ briefId, detail: initialDetail, token }: 
           <span style={{ fontSize: 12, color: "var(--design-ink3)" }}>
             v{brief.current_iteration}
           </span>
+        )}
+
+        {brief.status !== "building" && (
+          <DeployButton briefId={briefId} />
         )}
 
         {brief.status !== "building" && (
