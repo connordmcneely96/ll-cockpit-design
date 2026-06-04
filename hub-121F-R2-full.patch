@@ -1,0 +1,310 @@
+From 688a587baf6a267bf743137091796e8e531b7e36 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 4 Jun 2026 05:29:08 +0000
+Subject: [PATCH 1/2] feat(121F-R2): publishBriefToR2 + slug mgmt, tear out
+ Pages Direct Upload, drop token req
+
+---
+ migrations/0031_design_deployments_slug.sql |   4 +
+ src/lib/design/deploy.ts                    | 154 +++++++++-----------
+ 2 files changed, 73 insertions(+), 85 deletions(-)
+ create mode 100644 migrations/0031_design_deployments_slug.sql
+
+diff --git a/migrations/0031_design_deployments_slug.sql b/migrations/0031_design_deployments_slug.sql
+new file mode 100644
+index 0000000..fe23685
+--- /dev/null
++++ b/migrations/0031_design_deployments_slug.sql
+@@ -0,0 +1,4 @@
++-- Sprint 121F-R2 - add slug to design_deployments for nexus-sites serving model.
++-- Existing rows (dead Pages deploys) get NULL slug - never read by nexus-sites.
++ALTER TABLE design_deployments ADD COLUMN slug TEXT;
++CREATE INDEX IF NOT EXISTS idx_design_deployments_slug ON design_deployments(slug);
+diff --git a/src/lib/design/deploy.ts b/src/lib/design/deploy.ts
+index 6059792..f15e2b8 100644
+--- a/src/lib/design/deploy.ts
++++ b/src/lib/design/deploy.ts
+@@ -1,114 +1,98 @@
+ /**
+- * Sprint 121F - Cloudflare Pages Direct Upload deploy lib.
++ * Sprint 121F-R2 - publish a brief's page_html to R2 for nexus-sites serving.
+  *
+- * Deploys a brief's page_html to the shared `nexus-designs` Pages project
+- * at the path /{briefId}/, yielding a public URL:
+- *   https://nexus-designs.pages.dev/{briefId}/
++ * Writes published/{slug}/index.html to the shared ll-cockpit-r2 bucket.
++ * The nexus-sites Worker serves it at https://nexus-sites.connorpattern.workers.dev/{slug}/
+  *
+- * Prerequisites (one-time manual setup - see docs/121F-setup.md):
+- *   wrangler secret put CLOUDFLARE_API_TOKEN   (scope: Account.Cloudflare Pages:Edit)
+- *   wrangler secret put CLOUDFLARE_ACCOUNT_ID  (value: d3dbdd3e1ebbc28edf0ce756d9841490)
+- *   Create the `nexus-designs` Pages project once in the Cloudflare dashboard.
+- *
+- * CF Pages Direct Upload contract (assumption documented):
+- *   POST /accounts/{accountId}/pages/projects/{projectName}/deployments
+- *   multipart/form-data with two parts:
+- *     - "manifest": JSON string mapping file path to SHA-256 hex hash
+- *     - A file part named by its SHA-256 hex hash containing the raw file bytes
+- *   The API creates a deployment; the response JSON contains `id` (deployment ID).
+- *   Files must be uploaded as raw bytes (not base64). Only one file needed here.
++ * No Cloudflare management API, no token required. R2 write via binding only.
+  */
+ 
+ import type { CloudflareEnv } from '@/types'
+ 
+-const CF_API_BASE = 'https://api.cloudflare.com/client/v4'
+-const PAGES_PROJECT = 'nexus-designs'
++const NEXUS_SITES_BASE = 'https://nexus-sites.connorpattern.workers.dev'
+ 
+ export type DeployResult =
+-  | { ok: true; liveUrl: string; cfDeploymentId: string | null }
+-  | { ok: false; error: string; code: 'MISSING_SECRETS' | 'CF_API_ERROR' | 'NO_HTML' }
++  | { ok: true; liveUrl: string; slug: string }
++  | { ok: false; error: string; code: 'NO_HTML' | 'R2_ERROR' | 'SLUG_ERROR' }
++
++function slugify(text: string): string {
++  return text
++    .toLowerCase()
++    .replace(/[^a-z0-9]+/g, '-')
++    .replace(/^-+|-+$/g, '')
++    .slice(0, 40)
++}
+ 
+-export async function deployBriefToPages(
++export async function resolveSlugForBrief(
+   env: CloudflareEnv,
+-  opts: { briefId: string; html: string; iterationNumber: number | null },
++  briefId: string,
++  clientName: string,
++): Promise<string> {
++  const existing = await env.DB
++    .prepare(
++      `SELECT slug FROM design_deployments WHERE brief_id = ? AND slug IS NOT NULL ORDER BY created_at DESC LIMIT 1`,
++    )
++    .bind(briefId)
++    .first<{ slug: string }>()
++
++  if (existing?.slug) return existing.slug
++
++  const base = slugify(clientName) || 'site'
++
++  const taken = await env.DB
++    .prepare(`SELECT brief_id FROM design_deployments WHERE slug = ? LIMIT 1`)
++    .bind(base)
++    .first<{ brief_id: string }>()
++
++  if (!taken) return base
++
++  const candidate = `${base}-${briefId.slice(0, 6)}`
++  const takenAgain = await env.DB
++    .prepare(`SELECT brief_id FROM design_deployments WHERE slug = ? LIMIT 1`)
++    .bind(candidate)
++    .first<{ brief_id: string }>()
++
++  if (!takenAgain) return candidate
++
++  return `${base}-${briefId.slice(0, 12)}`
++}
++
++export async function publishBriefToR2(
++  env: CloudflareEnv,
++  opts: { briefId: string; html: string; iterationNumber: number | null; clientName: string },
+ ): Promise<DeployResult> {
+-  const { briefId, html } = opts
++  const { briefId, html, clientName } = opts
+ 
+-  if (!html || html.trim().length === 0) {
++  if (!html || !html.trim()) {
+     return { ok: false, code: 'NO_HTML', error: 'No HTML content to deploy.' }
+   }
+ 
+-  const apiToken = env.CLOUDFLARE_API_TOKEN
+-  const accountId = env.CLOUDFLARE_ACCOUNT_ID
+-  if (!apiToken || !accountId) {
+-    const missing = [!apiToken && 'CLOUDFLARE_API_TOKEN', !accountId && 'CLOUDFLARE_ACCOUNT_ID']
+-      .filter(Boolean)
+-      .join(', ')
++  let slug: string
++  try {
++    slug = await resolveSlugForBrief(env, briefId, clientName)
++  } catch (err) {
+     return {
+       ok: false,
+-      code: 'MISSING_SECRETS',
+-      error: `Missing Cloudflare secrets: ${missing}. Run: wrangler secret put CLOUDFLARE_API_TOKEN and wrangler secret put CLOUDFLARE_ACCOUNT_ID`,
++      code: 'SLUG_ERROR',
++      error: `Failed to resolve deployment slug: ${err instanceof Error ? err.message : String(err)}`,
+     }
+   }
+ 
+   try {
+-    const filePath = `/${briefId}/index.html`
+-    const encoder = new TextEncoder()
+-    const fileBytes = encoder.encode(html)
+-
+-    const hashBuffer = await crypto.subtle.digest('SHA-256', fileBytes)
+-    const hashHex = Array.from(new Uint8Array(hashBuffer))
+-      .map((b) => b.toString(16).padStart(2, '0'))
+-      .join('')
+-
+-    const manifest: Record<string, string> = { [filePath]: hashHex }
+-
+-    const form = new FormData()
+-    form.append('manifest', JSON.stringify(manifest))
+-    form.append(hashHex, new Blob([fileBytes], { type: 'text/html' }), 'index.html')
+-
+-    const url = `${CF_API_BASE}/accounts/${accountId}/pages/projects/${PAGES_PROJECT}/deployments`
+-    const res = await fetch(url, {
+-      method: 'POST',
+-      headers: { Authorization: `Bearer ${apiToken}` },
+-      body: form,
++    await env.R2.put(`published/${slug}/index.html`, html, {
++      httpMetadata: { contentType: 'text/html; charset=utf-8' },
+     })
+-
+-    const bodyText = await res.text()
+-
+-    if (!res.ok) {
+-      const snippet = bodyText.slice(0, 400)
+-      if (res.status === 404 && snippet.includes('project')) {
+-        return {
+-          ok: false,
+-          code: 'CF_API_ERROR',
+-          error: `Pages project "${PAGES_PROJECT}" not found.`,
+-        }
+-      }
+-      return {
+-        ok: false,
+-        code: 'CF_API_ERROR',
+-        error: `Cloudflare Pages API returned ${res.status}: ${snippet}`,
+-      }
+-    }
+-
+-    let cfDeploymentId: string | null = null
+-    try {
+-      const data = JSON.parse(bodyText) as { result?: { id?: string } }
+-      cfDeploymentId = data.result?.id ?? null
+-    } catch {
+-      // non-JSON success body - deployment still succeeded
+-    }
+-
+-    const liveUrl = `https://${PAGES_PROJECT}.pages.dev/${briefId}/`
+-    return { ok: true, liveUrl, cfDeploymentId }
+   } catch (err) {
+     return {
+       ok: false,
+-      code: 'CF_API_ERROR',
+-      error: `Unexpected error during deploy: ${err instanceof Error ? err.message : String(err)}`,
++      code: 'R2_ERROR',
++      error: `R2 write failed: ${err instanceof Error ? err.message : String(err)}`,
+     }
+   }
++
++  return { ok: true, liveUrl: `${NEXUS_SITES_BASE}/${slug}/`, slug }
+ }
+ 
+From 36af31d8ab64f7171a4b9833b0b8ea795e8ade76 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 4 Jun 2026 05:29:43 +0000
+Subject: [PATCH 2/2] feat(121F-R2): deploy route publishes to R2 via slug (nexus-sites URL)
+
+---
+ src/app/api/design/briefs/[id]/deploy/route.ts | 36 ++++++++-----------
+ 1 file changed, 15 insertions(+), 21 deletions(-)
+
+diff --git a/src/app/api/design/briefs/[id]/deploy/route.ts b/src/app/api/design/briefs/[id]/deploy/route.ts
+index 81d5d60..801b169 100644
+--- a/src/app/api/design/briefs/[id]/deploy/route.ts
++++ b/src/app/api/design/briefs/[id]/deploy/route.ts
+@@ -12,7 +12,7 @@
+ import { NextRequest } from 'next/server'
+ import { createClient } from '@/lib/supabase-server'
+ import { getBindings } from '@/lib/cloudflare'
+-import { deployBriefToPages } from '@/lib/design/deploy'
++import { publishBriefToR2 } from '@/lib/design/deploy'
+ import type { User } from '@supabase/supabase-js'
+ 
+ async function getUserFromRequest(req: NextRequest): Promise<User | null> {
+@@ -42,9 +42,9 @@ export async function POST(
+ 
+   const brief = await env.DB
+-    .prepare(`SELECT id FROM design_briefs WHERE id = ? AND user_id = ?`)
++    .prepare(`SELECT id, client_name FROM design_briefs WHERE id = ? AND user_id = ?`)
+     .bind(id, user.id)
+-    .first<{ id: string }>()
++    .first<{ id: string; client_name: string }>()
+   if (!brief) {
+     return new Response(JSON.stringify({ error: 'Brief not found' }), { status: 404 })
+   }
+@@ -64,22 +64,14 @@ export async function POST(
+     )
+   }
+ 
+-  const result = await deployBriefToPages(env, {
++  const result = await publishBriefToR2(env, {
+     briefId: id,
+     html: iteration.page_html,
+     iterationNumber: iteration.iteration_number ?? null,
++    clientName: brief.client_name,
+   })
+ 
+   if (!result.ok) {
+-    if (result.code === 'MISSING_SECRETS') {
+-      return new Response(
+-        JSON.stringify({
+-          error: result.error,
+-          setup: 'Run: wrangler secret put CLOUDFLARE_API_TOKEN && wrangler secret put CLOUDFLARE_ACCOUNT_ID',
+-        }),
+-        { status: 503 },
+-      )
+-    }
+     return new Response(JSON.stringify({ error: result.error }), { status: 502 })
+   }
+ 
+@@ -95,8 +87,8 @@ export async function POST(
+   await env.DB
+     .prepare(
+-      `INSERT INTO design_deployments (id, brief_id, iteration_number, live_url, cf_deployment_id, status, deployed_by, created_at)
+-       VALUES (?, ?, ?, ?, ?, 'live', ?, ?)`,
++      `INSERT INTO design_deployments (id, brief_id, iteration_number, live_url, slug, cf_deployment_id, status, deployed_by, created_at)
++       VALUES (?, ?, ?, ?, ?, NULL, 'live', ?, ?)`,
+     )
+     .bind(
+       deploymentId,
+       id,
+       iteration.iteration_number ?? null,
+       result.liveUrl,
+-      result.cfDeploymentId ?? null,
++      result.slug,
+       user.id,
+       now,
+     )
+@@ -106,6 +98,7 @@ export async function POST(
+     JSON.stringify({
+       ok: true,
+       live_url: result.liveUrl,
++      slug: result.slug,
+       deployment_id: deploymentId,
+       iteration_number: iteration.iteration_number ?? null,
+     }),
+@@ -137,10 +130,10 @@ export async function GET(
+ 
+   const deployment = await env.DB
+     .prepare(
+-      `SELECT live_url, status, created_at, iteration_number FROM design_deployments WHERE brief_id = ? AND status = 'live' ORDER BY created_at DESC LIMIT 1`,
++      `SELECT live_url, slug, status, created_at, iteration_number FROM design_deployments WHERE brief_id = ? AND status = 'live' ORDER BY created_at DESC LIMIT 1`,
+     )
+     .bind(id)
+-    .first<{ live_url: string; status: string; created_at: number; iteration_number: number | null }>()
++    .first<{ live_url: string; slug: string | null; status: string; created_at: number; iteration_number: number | null }>()
+ 
+   if (!deployment) {
+     return new Response(
+@@ -153,6 +146,7 @@ export async function GET(
+     JSON.stringify({
+       deployed: true,
+       live_url: deployment.live_url,
++      slug: deployment.slug,
+       status: deployment.status,
+       created_at: deployment.created_at,
+       iteration_number: deployment.iteration_number,
