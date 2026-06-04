@@ -1,0 +1,22 @@
+From 688a587baf6a267bf743137091796e8e531b7e36 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 4 Jun 2026 05:29:08 +0000
+Subject: [PATCH 1/2] feat(121F-R2): publishBriefToR2 + slug mgmt, tear out
+ Pages Direct Upload, drop token req
+
+---
+ migrations/0031_design_deployments_slug.sql |   4 +
+ src/lib/design/deploy.ts                    | 154 +++++++++-----------
+ 2 files changed, 73 insertions(+), 85 deletions(-)
+ create mode 100644 migrations/0031_design_deployments_slug.sql
+
+diff --git a/migrations/0031_design_deployments_slug.sql b/migrations/0031_design_deployments_slug.sql
+new file mode 100644
+index 0000000..fe23685
+--- /dev/null
++++ b/migrations/0031_design_deployments_slug.sql
+@@ -0,0 +1,4 @@
++-- Sprint 121F-R2 — add slug to design_deployments for nexus-sites serving model.
++-- Existing rows (dead Pages deploys) get NULL slug — never read by nexus-sites.
++ALTER TABLE design_deployments ADD COLUMN slug TEXT;
++CREATE INDEX IF NOT EXISTS idx_design_deployments_slug ON design_deployments(slug);
