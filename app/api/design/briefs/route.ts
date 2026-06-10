@@ -77,6 +77,8 @@ type CreateBriefBody = {
   // Sprint 18E — optional design system slug. If set, hub loads the system
   // from R2 and passes its DESIGN.md to DESIGNER as upstream context.
   attached_design_system_slug?: string
+  // Sprint 121A-1 — plan mode: hub returns a section plan instead of building.
+  plan_mode?: boolean
 }
 
 export async function POST(req: Request) {
@@ -144,6 +146,8 @@ export async function POST(req: Request) {
       orchestrator_run_id?: string
       subtask_count?: number
       attached_design_system?: { slug: string; name: string } | null
+      status?: string
+      plan?: { id: string; sections: unknown[]; estimated_total_cost_usd: number; section_count: number }
     }
 
     if (!hubData?.brief_id) {
@@ -181,6 +185,8 @@ export async function POST(req: Request) {
     return Response.json({
       ok: true,
       brief_id: hubData.brief_id,
+      status: hubData.status ?? null,
+      plan: hubData.plan ?? null,
       orchestrator_run_id: hubData.orchestrator_run_id,
       subtask_count: hubData.subtask_count,
       attached_design_system: hubData.attached_design_system ?? null,
