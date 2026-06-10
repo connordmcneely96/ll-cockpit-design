@@ -59,6 +59,19 @@ export default function IntakeClient() {
   const [templateStep, setTemplateStep] = useState(true);
   const [selectedTemplate, setSelectedTemplate] = useState<PageTemplate | null>(null);
 
+  // Sprint 121A-1 — plan mode review state
+  type PlannedSection = {
+    name: string; slug: string; description: string;
+    task_type: 'compose_simple' | 'compose_complex'; estimated_cost_usd: number
+  }
+  type SectionPlan = {
+    id: string; sections: PlannedSection[];
+    estimated_total_cost_usd: number; section_count: number
+  }
+  const [plan, setPlan] = useState<SectionPlan | null>(null);
+  const [planBriefId, setPlanBriefId] = useState<string | null>(null);
+  const [approving, setApproving] = useState(false);
+
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -144,6 +157,8 @@ export default function IntakeClient() {
           attached_design_system_slug: attachedSystem?.slug,
           // Sprint 18Y — skills (e.g. ['tweaks-panel'])
           skills: skills.length ? skills : undefined,
+          // Sprint 121A-1 — always request a plan first
+          plan_mode: true,
         }),
       });
 
@@ -160,11 +175,228 @@ export default function IntakeClient() {
         return;
       }
 
+      // Sprint 121A-1 — show plan review if hub returned one
+      if (data.plan && data.brief_id) {
+        setPlan(data.plan);
+        setPlanBriefId(data.brief_id);
+        setSubmitting(false);
+        return;
+      }
+
       router.push(`/design/${data.brief_id}`);
     } catch (err) {
       setError(err instanceof Error ? err.message : "request_failed");
       setSubmitting(false);
     }
+  }
+
+  async function handleApprove() {
+    if (!planBriefId) return;
+    setApproving(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/design/briefs/${planBriefId}/approve`, { method: "POST" });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data?.brief_id) {
+        setError(`Failed to start build: ${data?.detail ?? data?.error ?? "unknown_error"}`);
+        setApproving(false);
+        return;
+      }
+      router.push(`/design/${planBriefId}`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "request_failed");
+      setApproving(false);
+    }
+  }
+
+  if (plan) {
+    return (
+      <div
+        style={{
+          minHeight: "100vh",
+          background: "var(--design-bg)",
+          color: "var(--design-ink)",
+          fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+        }}
+      >
+        <header
+          style={{
+            height: 48,
+            display: "flex",
+            alignItems: "center",
+            padding: "0 20px",
+            borderBottom: "1px solid var(--design-border)",
+            background: "var(--design-bg)",
+            gap: 12,
+          }}
+        >
+          <button
+            onClick={() => router.push("/design")}
+            style={{
+              background: "none",
+              border: "none",
+              cursor: "pointer",
+              color: "var(--design-ink3)",
+              fontSize: 18,
+              lineHeight: 1,
+              padding: "4px 6px",
+            }}
+            title="Back to Design Build"
+          >
+            ←
+          </button>
+          <span style={{ fontSize: 16, fontWeight: 600 }}>
+            New {projectTypeLabel}
+          </span>
+          <span
+            style={{
+              fontSize: 11,
+              fontWeight: 500,
+              color: "var(--design-ink3)",
+              border: "1px solid var(--design-border)",
+              borderRadius: 999,
+              padding: "2px 8px",
+            }}
+          >
+            Review plan
+          </span>
+        </header>
+
+        <div
+          style={{
+            maxWidth: 720,
+            margin: "0 auto",
+            padding: "32px 24px 80px",
+          }}
+        >
+          <div style={{ marginBottom: 24 }}>
+            <h2 style={{ fontSize: 20, fontWeight: 700, margin: "0 0 6px", color: "var(--design-ink)" }}>
+              Review your plan
+            </h2>
+            <p style={{ fontSize: 13, color: "var(--design-ink3)", margin: 0 }}>
+              These sections will be generated. Costs are estimates.
+            </p>
+          </div>
+
+          <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 20 }}>
+            {plan.sections.map((s) => (
+              <div
+                key={s.slug}
+                style={{
+                  border: "1px solid var(--design-border)",
+                  background: "var(--design-bg2)",
+                  borderRadius: 8,
+                  padding: "12px 16px",
+                  display: "flex",
+                  alignItems: "flex-start",
+                  gap: 12,
+                }}
+              >
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 14, fontWeight: 600, color: "var(--design-ink)", marginBottom: 4 }}>
+                    {s.name}
+                  </div>
+                  <div style={{ fontSize: 12, color: "var(--design-ink3)", lineHeight: 1.5 }}>
+                    {s.description}
+                  </div>
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6, flexShrink: 0 }}>
+                  <span
+                    style={{
+                      fontSize: 11,
+                      fontWeight: 500,
+                      padding: "2px 8px",
+                      borderRadius: 999,
+                      background: "var(--design-terracotta-soft)",
+                      color: "var(--design-terracotta)",
+                      border: "1px solid var(--design-terracotta)",
+                    }}
+                  >
+                    {s.task_type === "compose_complex" ? "Detailed" : "Simple"}
+                  </span>
+                  <span style={{ fontSize: 12, color: "var(--design-ink)", fontVariantNumeric: "tabular-nums" }}>
+                    ${s.estimated_cost_usd.toFixed(3)}
+                  </span>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <div
+            style={{
+              border: "1px solid var(--design-border)",
+              background: "var(--design-bg2)",
+              borderRadius: 8,
+              padding: "12px 16px",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              marginBottom: 24,
+            }}
+          >
+            <span style={{ fontSize: 13, color: "var(--design-ink3)" }}>
+              Estimated total &mdash; {plan.section_count} section{plan.section_count !== 1 ? "s" : ""}
+            </span>
+            <span style={{ fontSize: 14, fontWeight: 600, color: "var(--design-ink)", fontVariantNumeric: "tabular-nums" }}>
+              ${plan.estimated_total_cost_usd.toFixed(2)}
+            </span>
+          </div>
+
+          {error && (
+            <div
+              style={{
+                padding: "10px 14px",
+                border: "1px solid #fecaca",
+                background: "#fee2e2",
+                color: "#991b1b",
+                borderRadius: 6,
+                fontSize: 13,
+                marginBottom: 16,
+                whiteSpace: "pre-wrap",
+                wordBreak: "break-word",
+              }}
+            >
+              {error}
+            </div>
+          )}
+
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 12 }}>
+            <button
+              type="button"
+              onClick={() => { setPlan(null); setPlanBriefId(null); }}
+              style={{
+                background: "transparent",
+                border: "1px solid var(--design-border)",
+                color: "var(--design-ink2)",
+                borderRadius: 6,
+                padding: "10px 18px",
+                fontSize: 13,
+                cursor: "pointer",
+              }}
+            >
+              ← Back to edit
+            </button>
+            <button
+              type="button"
+              onClick={handleApprove}
+              disabled={approving}
+              style={{
+                background: approving ? "var(--design-terracotta-disabled)" : "var(--design-terracotta)",
+                color: "white",
+                border: "none",
+                borderRadius: 6,
+                padding: "10px 22px",
+                fontSize: 13,
+                fontWeight: 500,
+                cursor: approving ? "not-allowed" : "pointer",
+              }}
+            >
+              {approving ? "Building…" : "Generate design"}
+            </button>
+          </div>
+        </div>
+      </div>
+    );
   }
 
   if (templateStep) {
@@ -550,7 +782,7 @@ export default function IntakeClient() {
               gap: 6,
             }}
           >
-            {submitting ? "Building…" : "+ Create design"}
+            {submitting ? "Planning…" : "+ Create design"}
           </button>
         </div>
 
